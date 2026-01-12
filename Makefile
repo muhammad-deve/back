@@ -3,6 +3,11 @@ APP_DIR := $(CURRENT_DIR)/app
 CMD_DIR := $(APP_DIR)/cmd
 PB_DATA_DIR := $(APP_DIR)/artifacts/pb_data
 
+PB_URL := http://127.0.0.1:8090
+PB_SUPERUSER_EMAIL := muhammadjonxudaynazarov226@gmail.com
+PB_SUPERUSER_PASSWORD := 1234567890
+PB_CHANNELS_FILE := $(APP_DIR)/pkg/json/channels.json
+
 REGISTRY=docker.io/oybekzdockerid
 PROJECT_NAME=pocketbase-frst
 ENV_TAG=dev
@@ -23,3 +28,8 @@ run-app-watch:
 
 run:
 	cd ${CMD_DIR} && go run main.go serve --dir=${PB_DATA_DIR}
+
+channels:
+	cd ${CMD_DIR} && go run main.go channels --dev=false --dir=${PB_DATA_DIR} --pb-url="${PB_URL}" --email="${PB_SUPERUSER_EMAIL}" --password="${PB_SUPERUSER_PASSWORD}" --file="${PB_CHANNELS_FILE}"
+
+channel: channels

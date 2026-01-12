@@ -1,17 +1,390 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/spf13/cobra"
 	application "gitlab.yurtal.tech/company/pocketbase-app-template/internal/app"
 	"gitlab.yurtal.tech/company/pocketbase-app-template/internal/config"
 )
+
+type channelJSON struct {
+	Channel     string   `json:"channel"`
+	Title       string   `json:"title"`
+	Website     string   `json:"website"`
+	URL         string   `json:"url"`
+	Quality     string   `json:"quality"`
+	Country     string   `json:"country"`
+	CountryCode string   `json:"country_code"`
+	Language    string   `json:"language"`
+	Categories  []string `json:"categories"`
+	IsWorking   bool     `json:"is_working"`
+	LogoURL     string   `json:"logo_url"`
+}
+
+type pbAuthResp struct {
+	Token string `json:"token"`
+}
+
+type pbListResp struct {
+	Items []struct {
+		Id string `json:"id"`
+	} `json:"items"`
+}
+
+type pbRecordResp struct {
+	Id string `json:"id"`
+}
+
+func envOrDefault(key, def string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return def
+}
+
+func pbURLJoin(base, p string) (string, error) {
+	base = strings.TrimRight(base, "/")
+	if base == "" {
+		return "", errors.New("empty PocketBase url")
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return base + p, nil
+}
+
+func pbDoJSON(client *http.Client, method, fullURL, token string, reqBody any, respBody any) error {
+	var bodyReader io.Reader
+	if reqBody != nil {
+		b, err := json.Marshal(reqBody)
+		if err != nil {
+			return err
+		}
+		bodyReader = bytes.NewReader(b)
+	}
+
+	req, err := http.NewRequest(method, fullURL, bodyReader)
+	if err != nil {
+		return err
+	}
+
+	if reqBody != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if strings.TrimSpace(token) != "" {
+		req.Header.Set("Authorization", token)
+	}
+
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	resBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return fmt.Errorf("request failed (%s %s): status=%d body=%s", method, fullURL, res.StatusCode, strings.TrimSpace(string(resBytes)))
+	}
+
+	if respBody == nil {
+		return nil
+	}
+
+	if len(resBytes) == 0 {
+		return nil
+	}
+
+	return json.Unmarshal(resBytes, respBody)
+}
+
+func pbAuthSuperuser(client *http.Client, pbBaseURL, email, password string) (string, error) {
+	fullURL, err := pbURLJoin(pbBaseURL, "/api/collections/_superusers/auth-with-password")
+	if err != nil {
+		return "", err
+	}
+
+	var resp pbAuthResp
+	err = pbDoJSON(client, http.MethodPost, fullURL, "", map[string]string{
+		"identity": email,
+		"password": password,
+	}, &resp)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(resp.Token) == "" {
+		return "", errors.New("missing auth token in response")
+	}
+	return resp.Token, nil
+}
+
+func pbFindFirstIDByField(client *http.Client, pbBaseURL, token, collection, field, value string) (string, error) {
+	filter := fmt.Sprintf("%s=\"%s\"", field, strings.ReplaceAll(value, "\"", "\\\""))
+	q := url.Values{}
+	q.Set("filter", filter)
+	q.Set("perPage", "1")
+	q.Set("page", "1")
+
+	fullURL, err := pbURLJoin(pbBaseURL, "/api/collections/"+collection+"/records?"+q.Encode())
+	if err != nil {
+		return "", err
+	}
+
+	var resp pbListResp
+	if err := pbDoJSON(client, http.MethodGet, fullURL, token, nil, &resp); err != nil {
+		return "", err
+	}
+	if len(resp.Items) == 0 {
+		return "", nil
+	}
+	return resp.Items[0].Id, nil
+}
+
+func pbCreateRecord(client *http.Client, pbBaseURL, token, collection string, payload any) (string, error) {
+	fullURL, err := pbURLJoin(pbBaseURL, "/api/collections/"+collection+"/records")
+	if err != nil {
+		return "", err
+	}
+	var resp pbRecordResp
+	if err := pbDoJSON(client, http.MethodPost, fullURL, token, payload, &resp); err != nil {
+		return "", err
+	}
+	return resp.Id, nil
+}
+
+func pbUpdateRecord(client *http.Client, pbBaseURL, token, collection, id string, payload any) error {
+	fullURL, err := pbURLJoin(pbBaseURL, "/api/collections/"+collection+"/records/"+id)
+	if err != nil {
+		return err
+	}
+	return pbDoJSON(client, http.MethodPatch, fullURL, token, payload, nil)
+}
+
+func renderProgress(done, total int, start time.Time) string {
+	if total <= 0 {
+		return ""
+	}
+
+	width := 30
+	if width < 10 {
+		width = 10
+	}
+
+	percent := float64(done) / float64(total)
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 1 {
+		percent = 1
+	}
+	filled := int(percent * float64(width))
+	if filled > width {
+		filled = width
+	}
+
+	elapsed := time.Since(start)
+	eta := time.Duration(0)
+	if done > 0 {
+		perItem := elapsed / time.Duration(done)
+		eta = perItem * time.Duration(total-done)
+	}
+
+	bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
+	return fmt.Sprintf("[%s] %3d%% (%d/%d) ETA %s", bar, int(percent*100), done, total, eta.Round(time.Second))
+}
 
 func main() {
 	log.Print("config initializing")
 	cfg := config.GetConfig()
 
 	app := application.NewApp(cfg)
+
+	channelsCmd := &cobra.Command{
+		Use:   "channels",
+		Short: "Import channels from channels.json into PocketBase",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pbBaseURL, _ := cmd.Flags().GetString("pb-url")
+			email, _ := cmd.Flags().GetString("email")
+			password, _ := cmd.Flags().GetString("password")
+			jsonPath, _ := cmd.Flags().GetString("file")
+
+			if strings.TrimSpace(pbBaseURL) == "" {
+				return errors.New("missing --pb-url")
+			}
+			if strings.TrimSpace(email) == "" {
+				return errors.New("missing --email")
+			}
+			if strings.TrimSpace(password) == "" {
+				return errors.New("missing --password")
+			}
+			if strings.TrimSpace(jsonPath) == "" {
+				return errors.New("missing --file")
+			}
+
+			absPath, err := filepath.Abs(jsonPath)
+			if err != nil {
+				return err
+			}
+			b, err := os.ReadFile(absPath)
+			if err != nil {
+				return err
+			}
+
+			var items []channelJSON
+			if err := json.Unmarshal(b, &items); err != nil {
+				return err
+			}
+			if len(items) == 0 {
+				fmt.Println("No channels found in JSON")
+				return nil
+			}
+
+			client := &http.Client{Timeout: 60 * time.Second}
+			token, err := pbAuthSuperuser(client, pbBaseURL, email, password)
+			if err != nil {
+				return err
+			}
+
+			start := time.Now()
+			lastRender := time.Time{}
+			total := len(items)
+
+			countryByCode := map[string]string{}
+			categoryByName := map[string]string{}
+
+			for i, ch := range items {
+				code := strings.TrimSpace(ch.CountryCode)
+				if code != "" {
+					if _, ok := countryByCode[code]; !ok {
+						id, err := pbFindFirstIDByField(client, pbBaseURL, token, "countries", "code", code)
+						if err != nil {
+							return err
+						}
+						if id == "" {
+							id, err = pbCreateRecord(client, pbBaseURL, token, "countries", map[string]any{
+								"code":     code,
+								"name":     strings.TrimSpace(ch.Country),
+								"language": strings.TrimSpace(ch.Language),
+							})
+							if err != nil {
+								return err
+							}
+						}
+						countryByCode[code] = id
+					}
+				}
+
+				categoryIDs := make([]string, 0, len(ch.Categories))
+				for _, cat := range ch.Categories {
+					name := strings.TrimSpace(strings.ToLower(cat))
+					if name == "" {
+						continue
+					}
+					id, ok := categoryByName[name]
+					if !ok {
+						id, err = pbFindFirstIDByField(client, pbBaseURL, token, "categories", "name", name)
+						if err != nil {
+							return err
+						}
+						if id == "" {
+							id, err = pbCreateRecord(client, pbBaseURL, token, "categories", map[string]any{
+								"name": name,
+							})
+							if err != nil {
+								return err
+							}
+						}
+						categoryByName[name] = id
+					}
+					categoryIDs = append(categoryIDs, id)
+				}
+
+				wbsite := strings.TrimSpace(ch.Website)
+				if wbsite == "" {
+					chKey := strings.TrimSpace(ch.Channel)
+					if chKey != "" {
+						wbsite = "https://" + chKey
+					}
+				}
+
+				streamURL := strings.TrimSpace(ch.URL)
+
+				payload := map[string]any{
+					"title":             strings.TrimSpace(ch.Title),
+					"wbsite":            wbsite,
+					"stream_url":        streamURL,
+					"logo_url":          strings.TrimSpace(ch.LogoURL),
+					"quality":           strings.TrimSpace(ch.Quality),
+					"is_url_working":    ch.IsWorking,
+					"is_logo_available": strings.TrimSpace(ch.LogoURL) != "",
+				}
+				if code != "" {
+					payload["country"] = countryByCode[code]
+				}
+				if len(categoryIDs) > 0 {
+					payload["category"] = categoryIDs
+				}
+
+				existingID := ""
+				if streamURL != "" {
+					existingID, err = pbFindFirstIDByField(client, pbBaseURL, token, "channels", "stream_url", streamURL)
+					if err != nil {
+						return err
+					}
+				}
+				if existingID == "" && wbsite != "" {
+					existingID, err = pbFindFirstIDByField(client, pbBaseURL, token, "channels", "wbsite", wbsite)
+					if err != nil {
+						return err
+					}
+				}
+
+				if existingID == "" {
+					_, err = pbCreateRecord(client, pbBaseURL, token, "channels", payload)
+					if err != nil {
+						return err
+					}
+				} else {
+					if err := pbUpdateRecord(client, pbBaseURL, token, "channels", existingID, payload); err != nil {
+						return err
+					}
+				}
+
+				done := i + 1
+				now := time.Now()
+				if done == total || now.Sub(lastRender) > 200*time.Millisecond {
+					lastRender = now
+					fmt.Printf("\r%s", renderProgress(done, total, start))
+				}
+			}
+
+			fmt.Printf("\r%s\n", renderProgress(total, total, start))
+			fmt.Println("Done")
+			return nil
+		},
+	}
+
+	channelsCmd.Flags().String("pb-url", envOrDefault("PB_URL", "http://127.0.0.1:8090"), "PocketBase base URL")
+	channelsCmd.Flags().String("email", envOrDefault("PB_SUPERUSER_EMAIL", ""), "PocketBase superuser email")
+	channelsCmd.Flags().String("password", envOrDefault("PB_SUPERUSER_PASSWORD", ""), "PocketBase superuser password")
+	channelsCmd.Flags().String("file", envOrDefault("PB_CHANNELS_FILE", "../pkg/json/channels.json"), "Path to channels.json")
+
+	app.RootCmd.AddCommand(channelsCmd)
 
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
