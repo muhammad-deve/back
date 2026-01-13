@@ -41,3 +41,11 @@ channel: channels
 
 movies:
 	cd ${CMD_DIR} && go run main.go movies --dev=false --dir=${PB_DATA_DIR} --pb-url="${PB_URL}" --email="${PB_SUPERUSER_EMAIL}" --password="${PB_SUPERUSER_PASSWORD}" --json-dir="${PB_MOVIES_DIR}" --workers=${PB_MOVIES_WORKERS} --retries=${PB_MOVIES_RETRIES} --max-attempts=${PB_MOVIES_MAX_ATTEMPTS}
+
+fix:
+	cd ${CMD_DIR} && go run main.go fix --dev=false --dir=${PB_DATA_DIR} --pb-url="${PB_URL}" --email="${PB_SUPERUSER_EMAIL}" --password="${PB_SUPERUSER_PASSWORD}" --json-dir="${PB_MOVIES_DIR}" --workers=${PB_MOVIES_WORKERS} --retries=${PB_MOVIES_RETRIES} --max-attempts=${PB_MOVIES_MAX_ATTEMPTS}
+
+profile:
+	cd ${CMD_DIR} && go run main.go profile --dev=false --dir=${PB_DATA_DIR} --pb-url="${PB_URL}" --email="${PB_SUPERUSER_EMAIL}" --password="${PB_SUPERUSER_PASSWORD}" --workers=${PB_MOVIES_WORKERS} --retries=${PB_MOVIES_RETRIES} --max-attempts=${PB_MOVIES_MAX_ATTEMPTS}
+
+profiel: profile

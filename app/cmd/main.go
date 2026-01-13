@@ -48,6 +48,14 @@ type pbListResp struct {
 	} `json:"items"`
 }
 
+type pbListAnyResp struct {
+	Page       int               `json:"page"`
+	PerPage    int               `json:"perPage"`
+	TotalItems int               `json:"totalItems"`
+	TotalPages int               `json:"totalPages"`
+	Items      []pbRecordAnyResp `json:"items"`
+}
+
 type pbRecordResp struct {
 	Id string `json:"id"`
 }
@@ -586,6 +594,515 @@ func main() {
 	channelsCmd.Flags().String("file", envOrDefault("PB_CHANNELS_FILE", "../pkg/json/channels.json"), "Path to channels.json")
 
 	app.RootCmd.AddCommand(channelsCmd)
+
+	fixCmd := &cobra.Command{
+		Use:   "fix",
+		Short: "Fix missing series quality and content URLs using corrected serie*.json files",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pbBaseURL, _ := cmd.Flags().GetString("pb-url")
+			email, _ := cmd.Flags().GetString("email")
+			password, _ := cmd.Flags().GetString("password")
+			jsonDir, _ := cmd.Flags().GetString("json-dir")
+			workers, _ := cmd.Flags().GetInt("workers")
+			retries, _ := cmd.Flags().GetInt("retries")
+			maxAttempts, _ := cmd.Flags().GetInt("max-attempts")
+
+			if strings.TrimSpace(pbBaseURL) == "" {
+				return errors.New("missing --pb-url")
+			}
+			if strings.TrimSpace(email) == "" {
+				return errors.New("missing --email")
+			}
+			if strings.TrimSpace(password) == "" {
+				return errors.New("missing --password")
+			}
+			if strings.TrimSpace(jsonDir) == "" {
+				return errors.New("missing --json-dir")
+			}
+
+			absDir, err := filepath.Abs(jsonDir)
+			if err != nil {
+				return err
+			}
+			entries, err := os.ReadDir(absDir)
+			if err != nil {
+				return err
+			}
+
+			paths := make([]string, 0, len(entries))
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				name := strings.ToLower(e.Name())
+				if !strings.HasSuffix(name, ".json") {
+					continue
+				}
+				if strings.HasPrefix(name, "serie") || strings.HasPrefix(name, "series") {
+					paths = append(paths, filepath.Join(absDir, e.Name()))
+				}
+			}
+			sort.Strings(paths)
+
+			if len(paths) == 0 {
+				return fmt.Errorf("no serie*.json files found in %s", absDir)
+			}
+
+			total := 0
+			for _, p := range paths {
+				c, err := countJSONArrayItems(p)
+				if err != nil {
+					return err
+				}
+				total += c
+			}
+			if total == 0 {
+				fmt.Println("No items found")
+				return nil
+			}
+
+			if workers <= 0 {
+				workers = runtime.NumCPU()
+			}
+			if workers > 20 {
+				workers = 20
+			}
+			if retries <= 0 {
+				retries = 5
+			}
+			if maxAttempts < 0 {
+				maxAttempts = 0
+			}
+
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			transport.MaxIdleConns = 200
+			transport.MaxIdleConnsPerHost = 200
+			transport.IdleConnTimeout = 90 * time.Second
+			client := &http.Client{Timeout: 60 * time.Second, Transport: transport}
+			token, err := pbAuthSuperuser(client, pbBaseURL, email, password)
+			if err != nil {
+				return err
+			}
+
+			start := time.Now()
+			var succeeded int64
+			var failed int64
+
+			jobs := make(chan movieJob, workers*8)
+			var wg sync.WaitGroup
+			var jobWG sync.WaitGroup
+			stopProgress := make(chan struct{})
+
+			fixOne := func(job movieJob) error {
+				m := job.Item
+				imdbID := strings.TrimSpace(m.ImdbID)
+				if imdbID == "" {
+					return errors.New("missing imdb_id")
+				}
+
+				existingMovieID, err := pbFindFirstIDByField(client, pbBaseURL, token, "movies", "imdb_id", imdbID)
+				if err != nil {
+					return err
+				}
+				if existingMovieID == "" {
+					return nil
+				}
+
+				rec, err := pbGetRecord(client, pbBaseURL, token, "movies", existingMovieID)
+				if err != nil {
+					return err
+				}
+				contentID := ""
+				if v, ok := rec["content_id"]; ok {
+					if s, ok := v.(string); ok {
+						contentID = s
+					}
+				}
+
+				moviePatch := map[string]any{}
+				if q := strings.TrimSpace(m.Quality); q != "" {
+					moviePatch["quality"] = q
+				}
+				if len(moviePatch) > 0 {
+					if err := pbUpdateRecord(client, pbBaseURL, token, "movies", existingMovieID, moviePatch); err != nil {
+						return err
+					}
+				}
+
+				contentPatch := map[string]any{}
+				if m.PrimaryImage != nil {
+					if u := strings.TrimSpace(m.PrimaryImage.URL); u != "" {
+						contentPatch["poster_url"] = u
+						contentPatch["poster_width"] = m.PrimaryImage.Width
+						contentPatch["poster_height"] = m.PrimaryImage.Height
+					}
+				}
+				if m.PrimaryVideo != nil {
+					if u := strings.TrimSpace(m.PrimaryVideo.VidsrcURL); u != "" {
+						contentPatch["vidsrc_url"] = u
+					}
+					if u := strings.TrimSpace(m.PrimaryVideo.VidlinkProURL); u != "" {
+						contentPatch["vidlink_url"] = u
+					}
+					if u := strings.TrimSpace(m.PrimaryVideo.AutoembedURL); u != "" {
+						contentPatch["autoembed_url"] = u
+					}
+					if u := strings.TrimSpace(m.PrimaryVideo.GomoURL); u != "" {
+						contentPatch["gomo_url"] = u
+					}
+					if u := strings.TrimSpace(m.PrimaryVideo.MoviesAPIURL); u != "" {
+						contentPatch["moviesapi_url"] = u
+					}
+				}
+
+				if contentID == "" {
+					if len(contentPatch) == 0 {
+						return nil
+					}
+					cid, err := pbCreateRecord(client, pbBaseURL, token, "contents", contentPatch)
+					if err != nil {
+						return err
+					}
+					if err := pbUpdateRecord(client, pbBaseURL, token, "movies", existingMovieID, map[string]any{"content_id": cid}); err != nil {
+						return err
+					}
+					return nil
+				}
+
+				if len(contentPatch) > 0 {
+					if err := pbUpdateRecord(client, pbBaseURL, token, "contents", contentID, contentPatch); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+
+			for w := 0; w < workers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for job := range jobs {
+						err := retry(retries, 250*time.Millisecond, func() error {
+							return fixOne(job)
+						})
+						if err != nil {
+							if maxAttempts == 0 || job.Attempt < maxAttempts {
+								job.Attempt++
+								select {
+								case jobs <- job:
+								default:
+									go func(j movieJob) { jobs <- j }(job)
+								}
+								continue
+							}
+							atomic.AddInt64(&failed, 1)
+							jobWG.Done()
+							continue
+						}
+						atomic.AddInt64(&succeeded, 1)
+						jobWG.Done()
+					}
+				}()
+			}
+
+			go func() {
+				ticker := time.NewTicker(250 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stopProgress:
+						return
+					case <-ticker.C:
+						completed := int(atomic.LoadInt64(&succeeded) + atomic.LoadInt64(&failed))
+						fmt.Printf("\r%s", renderProgress(completed, total, start))
+					}
+				}
+			}()
+
+			for _, p := range paths {
+				f, err := os.Open(p)
+				if err != nil {
+					close(jobs)
+					wg.Wait()
+					return err
+				}
+
+				dec := json.NewDecoder(f)
+				tok, err := dec.Token()
+				if err != nil {
+					f.Close()
+					close(jobs)
+					wg.Wait()
+					return err
+				}
+				if d, ok := tok.(json.Delim); !ok || d != '[' {
+					f.Close()
+					close(jobs)
+					wg.Wait()
+					return fmt.Errorf("expected JSON array in %s", p)
+				}
+
+				for dec.More() {
+					var item movieJSON
+					if err := dec.Decode(&item); err != nil {
+						f.Close()
+						close(jobs)
+						close(stopProgress)
+						wg.Wait()
+						return err
+					}
+					jobWG.Add(1)
+					jobs <- movieJob{Kind: "serie", Item: item, Attempt: 1}
+				}
+
+				_, err = dec.Token()
+				f.Close()
+				if err != nil {
+					close(jobs)
+					close(stopProgress)
+					wg.Wait()
+					return err
+				}
+			}
+
+			jobWG.Wait()
+			close(jobs)
+			wg.Wait()
+			close(stopProgress)
+
+			completed := int(atomic.LoadInt64(&succeeded) + atomic.LoadInt64(&failed))
+			fmt.Printf("\r%s\n", renderProgress(completed, total, start))
+			if f := atomic.LoadInt64(&failed); f > 0 {
+				return fmt.Errorf("fix completed with %d failed items (increase --max-attempts or inspect data)", f)
+			}
+			fmt.Println("Done")
+			return nil
+		},
+	}
+
+	fixCmd.Flags().String("pb-url", envOrDefault("PB_URL", "http://127.0.0.1:8090"), "PocketBase base URL")
+	fixCmd.Flags().String("email", envOrDefault("PB_SUPERUSER_EMAIL", ""), "PocketBase superuser email")
+	fixCmd.Flags().String("password", envOrDefault("PB_SUPERUSER_PASSWORD", ""), "PocketBase superuser password")
+	fixCmd.Flags().String("json-dir", envOrDefault("PB_MOVIES_DIR", "../pkg/json"), "Directory with serie*.json files")
+	fixCmd.Flags().Int("workers", 10, "Number of concurrent workers (max 20)")
+	fixCmd.Flags().Int("retries", 5, "Retries per item")
+	fixCmd.Flags().Int("max-attempts", 50, "Max attempts per item before giving up (0 = infinite)")
+
+	app.RootCmd.AddCommand(fixCmd)
+
+	profileCmd := &cobra.Command{
+		Use:   "profile",
+		Short: "Fill missing people profile images with a default placeholder",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pbBaseURL, _ := cmd.Flags().GetString("pb-url")
+			email, _ := cmd.Flags().GetString("email")
+			password, _ := cmd.Flags().GetString("password")
+			workers, _ := cmd.Flags().GetInt("workers")
+			retries, _ := cmd.Flags().GetInt("retries")
+			maxAttempts, _ := cmd.Flags().GetInt("max-attempts")
+			perPage, _ := cmd.Flags().GetInt("per-page")
+
+			if strings.TrimSpace(pbBaseURL) == "" {
+				return errors.New("missing --pb-url")
+			}
+			if strings.TrimSpace(email) == "" {
+				return errors.New("missing --email")
+			}
+			if strings.TrimSpace(password) == "" {
+				return errors.New("missing --password")
+			}
+
+			if workers <= 0 {
+				workers = runtime.NumCPU()
+			}
+			if workers > 20 {
+				workers = 20
+			}
+			if retries <= 0 {
+				retries = 5
+			}
+			if maxAttempts < 0 {
+				maxAttempts = 0
+			}
+			if perPage <= 0 {
+				perPage = 200
+			}
+			if perPage > 500 {
+				perPage = 500
+			}
+
+			transport := http.DefaultTransport.(*http.Transport).Clone()
+			transport.MaxIdleConns = 200
+			transport.MaxIdleConnsPerHost = 200
+			transport.IdleConnTimeout = 90 * time.Second
+			client := &http.Client{Timeout: 60 * time.Second, Transport: transport}
+
+			token, err := pbAuthSuperuser(client, pbBaseURL, email, password)
+			if err != nil {
+				return err
+			}
+
+			defaultURL := "https://www.gravatar.com/avatar/?d=mp&s=256"
+
+			listPage := func(page int) (pbListAnyResp, error) {
+				q := url.Values{}
+				q.Set("page", fmt.Sprintf("%d", page))
+				q.Set("perPage", fmt.Sprintf("%d", perPage))
+				q.Set("fields", "id,img_url,img_width,img_height")
+				fullURL, err := pbURLJoin(pbBaseURL, "/api/collections/people/records?"+q.Encode())
+				if err != nil {
+					return pbListAnyResp{}, err
+				}
+				var resp pbListAnyResp
+				if err := pbDoJSON(client, http.MethodGet, fullURL, token, nil, &resp); err != nil {
+					return pbListAnyResp{}, err
+				}
+				return resp, nil
+			}
+
+			first, err := listPage(1)
+			if err != nil {
+				return err
+			}
+			if first.TotalItems == 0 {
+				fmt.Println("No people records found")
+				return nil
+			}
+			totalPages := first.TotalPages
+			if totalPages <= 0 {
+				totalPages = 1
+			}
+
+			type profileJob struct {
+				ID      string
+				Attempt int
+			}
+
+			jobs := make(chan profileJob, workers*8)
+			var wg sync.WaitGroup
+			var jobWG sync.WaitGroup
+			stopProgress := make(chan struct{})
+
+			start := time.Now()
+			var processed int64
+			var updated int64
+			var failed int64
+
+			patchOne := func(id string) error {
+				payload := map[string]any{
+					"img_url":    defaultURL,
+					"img_width":  256,
+					"img_height": 256,
+				}
+				return pbUpdateRecord(client, pbBaseURL, token, "people", id, payload)
+			}
+
+			for w := 0; w < workers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for j := range jobs {
+						err := retry(retries, 250*time.Millisecond, func() error {
+							return patchOne(j.ID)
+						})
+						if err != nil {
+							if maxAttempts == 0 || j.Attempt < maxAttempts {
+								j.Attempt++
+								select {
+								case jobs <- j:
+								default:
+									go func(job profileJob) { jobs <- job }(j)
+								}
+								continue
+							}
+							atomic.AddInt64(&failed, 1)
+							atomic.AddInt64(&processed, 1)
+							jobWG.Done()
+							continue
+						}
+						atomic.AddInt64(&updated, 1)
+						atomic.AddInt64(&processed, 1)
+						jobWG.Done()
+					}
+				}()
+			}
+
+			go func() {
+				ticker := time.NewTicker(250 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stopProgress:
+						return
+					case <-ticker.C:
+						done := int(atomic.LoadInt64(&processed))
+						total := first.TotalItems
+						if done > total {
+							total = done
+						}
+						fmt.Printf("\r%s", renderProgress(done, total, start))
+					}
+				}
+			}()
+
+			processList := func(resp pbListAnyResp) {
+				for _, it := range resp.Items {
+					id, _ := it["id"].(string)
+					if strings.TrimSpace(id) == "" {
+						atomic.AddInt64(&processed, 1)
+						continue
+					}
+					imgURL, _ := it["img_url"].(string)
+					if strings.TrimSpace(imgURL) == "" {
+						jobWG.Add(1)
+						jobs <- profileJob{ID: id, Attempt: 1}
+					} else {
+						atomic.AddInt64(&processed, 1)
+					}
+				}
+			}
+
+			processList(first)
+			for page := 2; page <= totalPages; page++ {
+				resp, err := listPage(page)
+				if err != nil {
+					close(jobs)
+					close(stopProgress)
+					wg.Wait()
+					return err
+				}
+				processList(resp)
+			}
+
+			jobWG.Wait()
+			close(jobs)
+			wg.Wait()
+			close(stopProgress)
+
+			done := int(atomic.LoadInt64(&processed))
+			total := first.TotalItems
+			if done > total {
+				total = done
+			}
+			fmt.Printf("\r%s\n", renderProgress(done, total, start))
+			if f := atomic.LoadInt64(&failed); f > 0 {
+				return fmt.Errorf("profile completed with %d failed updates", f)
+			}
+			fmt.Printf("Updated %d people records\n", atomic.LoadInt64(&updated))
+			fmt.Println("Done")
+			return nil
+		},
+	}
+
+	profileCmd.Flags().String("pb-url", envOrDefault("PB_URL", "http://127.0.0.1:8090"), "PocketBase base URL")
+	profileCmd.Flags().String("email", envOrDefault("PB_SUPERUSER_EMAIL", ""), "PocketBase superuser email")
+	profileCmd.Flags().String("password", envOrDefault("PB_SUPERUSER_PASSWORD", ""), "PocketBase superuser password")
+	profileCmd.Flags().Int("workers", 10, "Number of concurrent workers (max 20)")
+	profileCmd.Flags().Int("retries", 5, "Retries per item")
+	profileCmd.Flags().Int("max-attempts", 50, "Max attempts per item before giving up (0 = infinite)")
+	profileCmd.Flags().Int("per-page", 200, "PocketBase list page size")
+
+	app.RootCmd.AddCommand(profileCmd)
 
 	moviesCmd := &cobra.Command{
 		Use:   "movies",
