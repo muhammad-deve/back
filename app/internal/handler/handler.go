@@ -23,6 +23,8 @@ func (h *Handler) Register(router *router.Router[*core.RequestEvent]) {
 			auth.GET("/", h.AuthHandler)
 		}
 
+		// Chat endpoint for Streamly AI
+		api.POST("/chat", h.ChatHandler)
 	}
 }
 
