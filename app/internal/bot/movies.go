@@ -1,0 +1,443 @@
+package bot
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"reflect"
+	"strings"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/pocketbase/pocketbase/core"
+)
+
+// Movie represents a movie from PocketBase
+type Movie struct {
+	ID             string  `json:"id"`
+	ImdbID         string  `json:"imdb_id"`
+	TmdbID         string  `json:"tmdb_id"`
+	Title          string  `json:"title"`
+	Plot           string  `json:"plot"`
+	Quality        string  `json:"quality"`
+	StartYear      int     `json:"start_year"`
+	RuntimeSeconds int     `json:"runtime_seconds"`
+	Rating         float64 `json:"rating"`
+	VoteCount      int     `json:"vote_count"`
+	PosterURL      string  `json:"poster_url"`
+	VidsrcURL      string  `json:"vidsrc_url"`
+	VidlinkProURL  string  `json:"vidlink_pro_url"`
+	AutoembedURL   string  `json:"autoembed_url"`
+	GomoURL        string  `json:"gomo_url"`
+	MoviesAPIdURL  string  `json:"moviesapi_url"`
+	Type           string  `json:"type"` // movie, series, etc.
+}
+
+func websiteBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("WEBSITE_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "http://localhost:3000"
+}
+
+// searchByIMDbID searches for a movie/series by IMDb ID
+func (b *Bot) searchByIMDbID(chatID int64, userID int64, imdbID string) {
+	b.sendMessage(chatID, "🔍 Searching...")
+
+	movie, err := b.findMovieByIMDbID(imdbID)
+	if err != nil {
+		log.Printf("Error finding movie: %v", err)
+		b.sendMessage(chatID, "❌ Movie not found. Please check the ID and try again.")
+		return
+	}
+
+	if movie != nil && isSeriesType(movie.Type) {
+		b.displaySeriesInfo(chatID, userID, movie)
+		return
+	}
+
+	b.displayMovieInfo(chatID, userID, movie)
+}
+
+// searchByTMDbID searches for a movie/series by TMDB ID
+func (b *Bot) searchByTMDbID(chatID int64, userID int64, tmdbID string) {
+	b.sendMessage(chatID, "🔍 Searching...")
+
+	movie, err := b.findMovieByTMDbID(tmdbID)
+	if err != nil {
+		log.Printf("Error finding movie: %v", err)
+		b.sendMessage(chatID, "❌ Movie not found. Please check the ID and try again.")
+		return
+	}
+
+	if movie != nil && isSeriesType(movie.Type) {
+		b.displaySeriesInfo(chatID, userID, movie)
+		return
+	}
+
+	b.displayMovieInfo(chatID, userID, movie)
+}
+
+// searchByName searches for movies/series by name
+func (b *Bot) searchByName(chatID int64, userID int64, name string) {
+	b.sendMessage(chatID, "🔍 Searching...")
+
+	movies, err := b.findMoviesByName(name)
+	if err != nil || len(movies) == 0 {
+		log.Printf("Error finding movies: %v", err)
+		b.sendMessage(chatID, "❌ No movies found. Try a different search term.")
+		return
+	}
+
+	filtered := make([]*Movie, 0, len(movies))
+	for _, m := range movies {
+		if m == nil {
+			continue
+		}
+		if isSeriesType(m.Type) {
+			continue
+		}
+		filtered = append(filtered, m)
+	}
+	if len(filtered) == 0 {
+		b.sendMessage(chatID, "❌ No movies found. Try a different search term.")
+		return
+	}
+
+	movies = filtered
+
+	if len(movies) == 1 {
+		b.displayMovieInfo(chatID, userID, movies[0])
+		return
+	}
+
+	// Display search results
+	b.displaySearchResults(chatID, movies)
+}
+
+// findMovieByIMDbID finds a movie by IMDb ID in PocketBase
+func (b *Bot) findMovieByIMDbID(imdbID string) (*Movie, error) {
+	collection, err := b.pb.FindCollectionByNameOrId("movies")
+	if err != nil {
+		return nil, err
+	}
+
+	filter := fmt.Sprintf("imdb_id = '%s'", imdbID)
+	records, err := b.pb.FindRecordsByFilter(collection.Id, filter, "", 1, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(records) == 0 {
+		return nil, fmt.Errorf("movie not found")
+	}
+
+	return b.recordToMovie(records[0]), nil
+}
+
+// findMovieByTMDbID finds a movie by TMDB ID in PocketBase
+func (b *Bot) findMovieByTMDbID(tmdbID string) (*Movie, error) {
+	collection, err := b.pb.FindCollectionByNameOrId("movies")
+	if err != nil {
+		return nil, err
+	}
+
+	filter := fmt.Sprintf("tmdb_id = '%s'", tmdbID)
+	records, err := b.pb.FindRecordsByFilter(collection.Id, filter, "", 1, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(records) == 0 {
+		return nil, fmt.Errorf("movie not found")
+	}
+
+	return b.recordToMovie(records[0]), nil
+}
+
+// findMoviesByName searches movies by name in PocketBase
+func (b *Bot) findMoviesByName(name string) ([]*Movie, error) {
+	collection, err := b.pb.FindCollectionByNameOrId("movies")
+	if err != nil {
+		return nil, err
+	}
+
+	// Escape single quotes in name
+	escapedName := strings.ReplaceAll(name, "'", "''")
+	filter := fmt.Sprintf("title ~ '%s'", escapedName)
+
+	records, err := b.pb.FindRecordsByFilter(collection.Id, filter, "-rating", 10, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	var movies []*Movie
+	for _, record := range records {
+		movies = append(movies, b.recordToMovie(record))
+	}
+
+	return movies, nil
+}
+
+// recordToMovie converts a PocketBase record to a Movie struct
+func (b *Bot) recordToMovie(record interface{}) *Movie {
+	// Type assertion for PocketBase record
+	type RecordGetter interface {
+		GetString(key string) string
+		GetInt(key string) int
+		GetFloat(key string) float64
+	}
+
+	r, ok := record.(RecordGetter)
+	if !ok {
+		return nil
+	}
+
+	id := r.GetString("id")
+	if strings.TrimSpace(id) == "" {
+		v := reflect.ValueOf(record)
+		if v.Kind() == reflect.Pointer {
+			v = v.Elem()
+		}
+		if v.IsValid() && v.Kind() == reflect.Struct {
+			f := v.FieldByName("Id")
+			if f.IsValid() && f.Kind() == reflect.String {
+				id = f.String()
+			}
+		}
+	}
+
+	return &Movie{
+		ID:             id,
+		ImdbID:         r.GetString("imdb_id"),
+		TmdbID:         r.GetString("tmdb_id"),
+		Title:          r.GetString("title"),
+		Plot:           r.GetString("plot"),
+		Quality:        r.GetString("quality"),
+		StartYear:      r.GetInt("start_year"),
+		RuntimeSeconds: r.GetInt("runtime_seconds"),
+		Rating:         r.GetFloat("rating"),
+		VoteCount:      r.GetInt("vote_count"),
+		PosterURL:      r.GetString("poster_url"),
+		VidsrcURL:      r.GetString("vidsrc_url"),
+		VidlinkProURL:  r.GetString("vidlink_pro_url"),
+		AutoembedURL:   r.GetString("autoembed_url"),
+		GomoURL:        r.GetString("gomo_url"),
+		MoviesAPIdURL:  r.GetString("moviesapi_url"),
+		Type:           r.GetString("type"),
+	}
+}
+
+// displayMovieInfo displays movie information with inline buttons
+func (b *Bot) displayMovieInfo(chatID int64, userID int64, movie *Movie) {
+	// Format runtime
+	hours := movie.RuntimeSeconds / 3600
+	minutes := (movie.RuntimeSeconds % 3600) / 60
+	var runtime string
+	if hours > 0 {
+		runtime = fmt.Sprintf("%dh %dm", hours, minutes)
+	} else {
+		runtime = fmt.Sprintf("%dm", minutes)
+	}
+
+	// Truncate plot if too long
+	plot := movie.Plot
+	if len(plot) > 300 {
+		plot = plot[:297] + "..."
+	}
+
+	text := fmt.Sprintf(`🎬 <b>%s</b> (%d)
+
+⭐ Rating: %.1f/10 (%d votes)
+⏱ Duration: %s
+📺 Quality: %s
+
+📝 <b>Plot:</b>
+%s`,
+		movie.Title,
+		movie.StartYear,
+		movie.Rating,
+		movie.VoteCount,
+		runtime,
+		movie.Quality,
+		plot,
+	)
+
+	// Build inline keyboard
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	// Watch button - all users get website link
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonURL("🌐 Watch on Website", fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)),
+	))
+
+	// Admins get download button
+	if b.isAdmin(userID) {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("📥 Download Video", fmt.Sprintf("watch_movie:%s", movie.ID)),
+		))
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("◀️ Back to Menu", "main_menu"),
+	))
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	// Send poster if available
+	if movie.PosterURL != "" {
+		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(movie.PosterURL))
+		photo.Caption = text
+		photo.ParseMode = "HTML"
+		photo.ReplyMarkup = keyboard
+		if _, err := b.api.Send(photo); err != nil {
+			// Fallback to text only
+			log.Printf("Failed to send photo: %v", err)
+			b.sendMessageWithInline(chatID, text, keyboard)
+		}
+	} else {
+		b.sendMessageWithInline(chatID, text, keyboard)
+	}
+
+	// Update watch history
+	b.updateWatchHistory(userID, movie.ID, "movie")
+}
+
+// displaySearchResults displays search results with selection buttons
+func (b *Bot) displaySearchResults(chatID int64, movies []*Movie) {
+	text := "🔍 <b>Search Results:</b>\n\n"
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	for i, movie := range movies {
+		if i >= 8 {
+			text += fmt.Sprintf("... and %d more results", len(movies)-8)
+			break
+		}
+
+		text += fmt.Sprintf("%d. <b>%s</b> (%d) ⭐%.1f\n", i+1, movie.Title, movie.StartYear, movie.Rating)
+
+		// Add selection button
+		buttonText := fmt.Sprintf("%d. %s", i+1, truncateString(movie.Title, 25))
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("movie:%s", movie.ID)),
+		))
+	}
+
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("◀️ Back to Menu", "main_menu"),
+	))
+
+	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	b.sendMessageWithInline(chatID, text, keyboard)
+}
+
+// handleMovieSelection handles when a user selects a movie from search results
+func (b *Bot) handleMovieSelection(chatID int64, userID int64, movieID string) {
+	movie, err := b.findMovieByID(movieID)
+	if err != nil {
+		log.Printf("Error finding movie: %v", err)
+		b.sendMessage(chatID, "❌ Movie not found.")
+		return
+	}
+
+	b.displayMovieInfo(chatID, userID, movie)
+}
+
+// findMovieByID finds a movie by its PocketBase ID
+func (b *Bot) findMovieByID(id string) (*Movie, error) {
+	record, err := b.pb.FindRecordById("movies", id)
+	if err != nil {
+		return nil, err
+	}
+
+	return b.recordToMovie(record), nil
+}
+
+// handleWatchMovie initiates the video download and send process
+func (b *Bot) handleWatchMovie(chatID int64, userID int64, movieID string) {
+	movie, err := b.findMovieByID(movieID)
+	if err != nil {
+		b.sendMessage(chatID, "❌ Movie not found.")
+		return
+	}
+
+	// Get embed URL
+	embedURL := movie.VidsrcURL
+	if embedURL == "" {
+		embedURL = movie.VidlinkProURL
+	}
+	if embedURL == "" {
+		embedURL = movie.AutoembedURL
+	}
+	if embedURL == "" {
+		b.sendMessage(chatID, "❌ No video source available for this movie.")
+		return
+	}
+
+	b.sendMessage(chatID, "⏳ Downloading video... This may take several minutes.")
+
+	// Start download in background
+	go func() {
+		videoPath, err := b.downloads.DownloadVideo(embedURL, movie.Title)
+		if err != nil {
+			log.Printf("Download failed: %v", err)
+			b.sendMessage(chatID, fmt.Sprintf("❌ Download failed: %v", err))
+			return
+		}
+
+		// Send video file
+		b.sendMessage(chatID, "📤 Sending video...")
+		if err := b.sendVideoFile(chatID, videoPath, movie.Title); err != nil {
+			log.Printf("Failed to send video: %v", err)
+			b.sendMessage(chatID, "❌ Failed to send video. File might be too large.")
+			return
+		}
+
+		b.sendMessage(chatID, "✅ Enjoy watching! 🍿")
+	}()
+}
+
+// sendVideoFile sends a video file to the user
+func (b *Bot) sendVideoFile(chatID int64, filePath string, title string) error {
+	video := tgbotapi.NewVideo(chatID, tgbotapi.FilePath(filePath))
+	video.Caption = fmt.Sprintf("🎬 %s", title)
+
+	_, err := b.api.Send(video)
+	return err
+}
+
+// updateWatchHistory records a movie view in watch history
+func (b *Bot) updateWatchHistory(userID int64, contentID string, contentType string) {
+	collection, err := b.pb.FindCollectionByNameOrId("watch_history")
+	if err != nil {
+		log.Printf("Watch history collection not found: %v", err)
+		return
+	}
+
+	record := core.NewRecord(collection)
+
+	// Get user record ID
+	user, err := b.getUser(userID)
+	if err != nil || user == nil {
+		return
+	}
+
+	record.Set("user", user.ID)
+	if contentType == "movie" {
+		record.Set("movie", contentID)
+	} else {
+		record.Set("channel", contentID)
+	}
+
+	if err := b.pb.Save(record); err != nil {
+		log.Printf("Failed to save watch history: %v", err)
+	}
+}
+
+// truncateString truncates a string to a maximum length
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}

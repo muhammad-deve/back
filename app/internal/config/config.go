@@ -4,14 +4,17 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/ilyakaznacheev/cleanenv"
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
 	GeminiAPIKey string `env:"GEMINI_API_KEY"`
+	BotToken     string `env:"BOT_TOKEN"`
 }
 
 var instance *Config
@@ -24,7 +27,9 @@ func GetConfig() *Config {
 		instance = &Config{}
 
 		rootPath := flag.String("root_path", "", "Root path")
-		flag.Parse()
+		if !flag.Parsed() {
+			flag.Parse()
+		}
 
 		envPaths := []string{
 			*rootPath + ".env",
@@ -37,13 +42,10 @@ func GetConfig() *Config {
 			if err != nil {
 				continue
 			}
-			// Check if file exists (basic check by trying to read it or stat it, but cleanenv handles read error)
-			// We just want to find one that might work, or rely on cleanenv failures.
-			// Let's try to read with cleanenv, if it succeeds (no error), we are good.
-			// But cleanenv.ReadConfig might return error if file not found OR if content is bad.
-			// Let's just pass the first one that exists technically.
 
-			// Actually, let's just loop and try to read.
+			// Load into os.Environ first (so other packages using os.Getenv work)
+			_ = godotenv.Overload(absPath)
+
 			if err := cleanenv.ReadConfig(absPath, instance); err == nil {
 				envFilePath = absPath
 				fmt.Printf("Loaded config from %s\n", absPath)
@@ -55,6 +57,11 @@ func GetConfig() *Config {
 			fmt.Println("Could not load .env file from paths, starting with default/env vars")
 			// Try reading from env vars directly
 			cleanenv.ReadEnv(instance)
+		}
+
+		// Ensure BOT_TOKEN is available via os.Getenv for bot startup.
+		if token := instance.BotToken; token != "" {
+			_ = os.Setenv("BOT_TOKEN", instance.BotToken)
 		}
 	})
 	return instance
