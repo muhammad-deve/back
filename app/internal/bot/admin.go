@@ -26,25 +26,24 @@ func (b *Bot) showAdminPanel(chatID int64) {
 
 Select an option below:`
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📢 Mandatory Channels", "admin:channels"),
+	keyboard := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(adminMenuMandatoryChannelsButton),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📤 Broadcast Message", "admin:broadcast"),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(adminMenuBroadcastButton),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("👥 Users Management", "admin:users"),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(adminMenuUsersButton),
+			tgbotapi.NewKeyboardButton(adminMenuStatsButton),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📊 Statistics", "admin:stats"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("◀️ Back to Menu", "main_menu"),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(adminMenuBackToMenuButton),
 		),
 	)
+	keyboard.ResizeKeyboard = true
 
-	b.sendMessageWithInline(chatID, text, keyboard)
+	b.sendMessageWithKeyboard(chatID, text, keyboard)
 }
 
 // handleAdminCallback routes admin panel callbacks
@@ -74,7 +73,11 @@ func (b *Bot) handleAdminCallback(chatID int64, userID int64, parts []string) {
 			b.deleteChannel(chatID, parts[1])
 		}
 	case "broadcast":
-		b.promptBroadcast(chatID)
+		b.promptBroadcast(chatID, userID)
+	case "broadcast_confirm":
+		b.confirmBroadcast(chatID, userID)
+	case "broadcast_cancel":
+		b.cancelBroadcast(chatID, userID)
 	case "users":
 		b.showUsersManagement(chatID)
 	case "export_users":
@@ -200,23 +203,49 @@ func (b *Bot) deleteChannel(chatID int64, channelID string) {
 }
 
 // promptBroadcast shows broadcast instructions
-func (b *Bot) promptBroadcast(chatID int64) {
+func (b *Bot) promptBroadcast(chatID int64, userID int64) {
+	b.setAdminMode(userID, adminModeAwaitBroadcast)
+
 	text := `📤 <b>Broadcast Message</b>
 
-Send your message after this command:
-<code>/broadcast Your message here</code>
+Send (or forward) the message you want to broadcast.
 
-Or forward any message to broadcast it.
+After you send it, you'll get <b>Confirm</b> / <b>Cancel</b> buttons.
 
-⚠️ This will send to ALL registered users.`
+To cancel now, send <code>/cancel</code>.`
 
+	b.sendMessage(chatID, text)
+}
+
+func (b *Bot) showBroadcastConfirm(chatID int64) {
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("◀️ Back", "admin:back"),
+			tgbotapi.NewInlineKeyboardButtonData("✅ Confirm", "admin:broadcast_confirm"),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Cancel", "admin:broadcast_cancel"),
 		),
 	)
+	b.sendMessageWithInline(chatID, "Send this broadcast to everybody?", keyboard)
+}
 
-	b.sendMessageWithInline(chatID, text, keyboard)
+func (b *Bot) cancelBroadcast(chatID int64, userID int64) {
+	b.clearPendingBroadcast(userID)
+	b.setAdminMode(userID, adminModeNone)
+	b.showAdminPanel(chatID)
+}
+
+func (b *Bot) confirmBroadcast(chatID int64, userID int64) {
+	if err := b.broadcastPending(userID); err != nil {
+		b.sendMessage(chatID, fmt.Sprintf("❌ Broadcast failed: %v", err))
+		b.clearPendingBroadcast(userID)
+		b.setAdminMode(userID, adminModeNone)
+		b.showAdminPanel(chatID)
+		return
+	}
+
+	b.sendMessage(chatID, "✅ Broadcast sent.")
+	b.clearPendingBroadcast(userID)
+	b.setAdminMode(userID, adminModeNone)
+	b.showAdminPanel(chatID)
 }
 
 // BroadcastMessage sends a message to all active users
@@ -453,8 +482,12 @@ func (b *Bot) ProcessAdminTextCommand(chatID int64, userID int64, text string) b
 			return true
 		}
 	case "/broadcast":
-		if len(parts) > 1 {
-			b.BroadcastMessage(chatID, parts[1])
+		// Do not auto-broadcast from command text; require confirmation flow.
+		b.promptBroadcast(chatID, userID)
+		return true
+	case "/cancel":
+		if b.getAdminMode(userID) == adminModeAwaitBroadcast {
+			b.cancelBroadcast(chatID, userID)
 			return true
 		}
 	case "/user":

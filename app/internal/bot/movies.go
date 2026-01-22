@@ -21,7 +21,7 @@ type Movie struct {
 	Quality        string  `json:"quality"`
 	StartYear      int     `json:"start_year"`
 	RuntimeSeconds int     `json:"runtime_seconds"`
-	Rating         float64 `json:"rating"`
+	Rating         float64 `json:"imdb_rating"`
 	VoteCount      int     `json:"vote_count"`
 	PosterURL      string  `json:"poster_url"`
 	VidsrcURL      string  `json:"vidsrc_url"`
@@ -33,13 +33,16 @@ type Movie struct {
 }
 
 func websiteBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("DOMAIN")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
 	if v := strings.TrimSpace(os.Getenv("WEBSITE_URL")); v != "" {
 		return strings.TrimRight(v, "/")
 	}
 	return "http://localhost:3000"
 }
 
-// searchByIMDbID searches for a movie/series by IMDb ID
+// searchByIMDbID searches for a movie by IMDb ID
 func (b *Bot) searchByIMDbID(chatID int64, userID int64, imdbID string) {
 	b.sendMessage(chatID, "🔍 Searching...")
 
@@ -50,15 +53,15 @@ func (b *Bot) searchByIMDbID(chatID int64, userID int64, imdbID string) {
 		return
 	}
 
-	if movie != nil && isSeriesType(movie.Type) {
-		b.displaySeriesInfo(chatID, userID, movie)
+	if movie == nil || isSeriesType(movie.Type) {
+		b.sendMessage(chatID, "❌ No movies found. Try a different search term.")
 		return
 	}
 
 	b.displayMovieInfo(chatID, userID, movie)
 }
 
-// searchByTMDbID searches for a movie/series by TMDB ID
+// searchByTMDbID searches for a movie by TMDB ID
 func (b *Bot) searchByTMDbID(chatID int64, userID int64, tmdbID string) {
 	b.sendMessage(chatID, "🔍 Searching...")
 
@@ -69,15 +72,15 @@ func (b *Bot) searchByTMDbID(chatID int64, userID int64, tmdbID string) {
 		return
 	}
 
-	if movie != nil && isSeriesType(movie.Type) {
-		b.displaySeriesInfo(chatID, userID, movie)
+	if movie == nil || isSeriesType(movie.Type) {
+		b.sendMessage(chatID, "❌ No movies found. Try a different search term.")
 		return
 	}
 
 	b.displayMovieInfo(chatID, userID, movie)
 }
 
-// searchByName searches for movies/series by name
+// searchByName searches for movies by name
 func (b *Bot) searchByName(chatID int64, userID int64, name string) {
 	b.sendMessage(chatID, "🔍 Searching...")
 
@@ -88,22 +91,20 @@ func (b *Bot) searchByName(chatID int64, userID int64, name string) {
 		return
 	}
 
-	filtered := make([]*Movie, 0, len(movies))
+	var moviesOnly []*Movie
 	for _, m := range movies {
-		if m == nil {
+		if m == nil || isSeriesType(m.Type) {
 			continue
 		}
-		if isSeriesType(m.Type) {
-			continue
-		}
-		filtered = append(filtered, m)
+		moviesOnly = append(moviesOnly, m)
 	}
-	if len(filtered) == 0 {
+
+	if len(moviesOnly) == 0 {
 		b.sendMessage(chatID, "❌ No movies found. Try a different search term.")
 		return
 	}
 
-	movies = filtered
+	movies = moviesOnly
 
 	if len(movies) == 1 {
 		b.displayMovieInfo(chatID, userID, movies[0])
@@ -165,7 +166,7 @@ func (b *Bot) findMoviesByName(name string) ([]*Movie, error) {
 	escapedName := strings.ReplaceAll(name, "'", "''")
 	filter := fmt.Sprintf("title ~ '%s'", escapedName)
 
-	records, err := b.pb.FindRecordsByFilter(collection.Id, filter, "-rating", 10, 0)
+	records, err := b.pb.FindRecordsByFilter(collection.Id, filter, "-imdb_rating", 10, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +216,7 @@ func (b *Bot) recordToMovie(record interface{}) *Movie {
 		Quality:        r.GetString("quality"),
 		StartYear:      r.GetInt("start_year"),
 		RuntimeSeconds: r.GetInt("runtime_seconds"),
-		Rating:         r.GetFloat("rating"),
+		Rating:         r.GetFloat("imdb_rating"),
 		VoteCount:      r.GetInt("vote_count"),
 		PosterURL:      r.GetString("poster_url"),
 		VidsrcURL:      r.GetString("vidsrc_url"),
@@ -227,38 +228,38 @@ func (b *Bot) recordToMovie(record interface{}) *Movie {
 	}
 }
 
+func movieBestEmbedURL(movie *Movie) string {
+	if movie == nil {
+		return ""
+	}
+	if strings.TrimSpace(movie.AutoembedURL) != "" {
+		return movie.AutoembedURL
+	}
+	if strings.TrimSpace(movie.VidlinkProURL) != "" {
+		return movie.VidlinkProURL
+	}
+	if strings.TrimSpace(movie.VidsrcURL) != "" {
+		return movie.VidsrcURL
+	}
+	return ""
+}
+
 // displayMovieInfo displays movie information with inline buttons
 func (b *Bot) displayMovieInfo(chatID int64, userID int64, movie *Movie) {
-	// Format runtime
-	hours := movie.RuntimeSeconds / 3600
-	minutes := (movie.RuntimeSeconds % 3600) / 60
-	var runtime string
-	if hours > 0 {
-		runtime = fmt.Sprintf("%dh %dm", hours, minutes)
-	} else {
-		runtime = fmt.Sprintf("%dm", minutes)
-	}
-
 	// Truncate plot if too long
 	plot := movie.Plot
-	if len(plot) > 300 {
-		plot = plot[:297] + "..."
+	if len(plot) > 700 {
+		plot = plot[:697] + "..."
 	}
 
-	text := fmt.Sprintf(`🎬 <b>%s</b> (%d)
+	text := fmt.Sprintf(`🎬 <b>%s</b>
 
-⭐ Rating: %.1f/10 (%d votes)
-⏱ Duration: %s
-📺 Quality: %s
+⭐ Rating: %.1f/10
 
-📝 <b>Plot:</b>
+📝 <b>Description:</b>
 %s`,
 		movie.Title,
-		movie.StartYear,
 		movie.Rating,
-		movie.VoteCount,
-		runtime,
-		movie.Quality,
 		plot,
 	)
 
@@ -267,14 +268,19 @@ func (b *Bot) displayMovieInfo(chatID int64, userID int64, movie *Movie) {
 
 	// Watch button - all users get website link
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonURL("🌐 Watch on Website", fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)),
+		tgbotapi.NewInlineKeyboardButtonURL("🌐 Watch online", fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)),
 	))
 
-	// Admins get download button
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("📥 Download", fmt.Sprintf("watch_movie:%s", movie.ID)),
+	))
+
 	if b.isAdmin(userID) {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📥 Download Video", fmt.Sprintf("watch_movie:%s", movie.ID)),
-		))
+		if u := movieBestEmbedURL(movie); u != "" {
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonURL("🚫 Watch without ads", u),
+			))
+		}
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
@@ -314,10 +320,10 @@ func (b *Bot) displaySearchResults(chatID int64, movies []*Movie) {
 			break
 		}
 
-		text += fmt.Sprintf("%d. <b>%s</b> (%d) ⭐%.1f\n", i+1, movie.Title, movie.StartYear, movie.Rating)
+		text += fmt.Sprintf("%d. <b>%s</b> ⭐%.1f\n", i+1, movie.Title, movie.Rating)
 
 		// Add selection button
-		buttonText := fmt.Sprintf("%d. %s", i+1, truncateString(movie.Title, 25))
+		buttonText := fmt.Sprintf("%s ⭐%.1f", truncateString(movie.Title, 25), movie.Rating)
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("movie:%s", movie.ID)),
 		))

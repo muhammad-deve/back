@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,8 +22,15 @@ type Bot struct {
 	downloads   *DownloadManager
 	stateMu     sync.RWMutex
 	userMode    map[int64]string
+	adminMode   map[int64]string
+	pendingBC   map[int64]*pendingBroadcast
 	ctx         context.Context
 	cancel      context.CancelFunc
+}
+
+type pendingBroadcast struct {
+	FromChatID int64
+	MessageID  int
 }
 
 const (
@@ -30,6 +38,17 @@ const (
 	modeMovies   = "movies"
 	modeSeries   = "series"
 	modeChannels = "channels"
+
+	adminModeNone           = ""
+	adminModeAwaitBroadcast = "await_broadcast"
+)
+
+const (
+	adminMenuMandatoryChannelsButton = "📢 Mandatory Channels"
+	adminMenuBroadcastButton         = "📤 Broadcast Message"
+	adminMenuUsersButton             = "👥 Users Management"
+	adminMenuStatsButton             = "📊 Statistics"
+	adminMenuBackToMenuButton        = "◀️ Back to Menu"
 )
 
 func (b *Bot) setMode(userID int64, mode string) {
@@ -45,6 +64,50 @@ func (b *Bot) getMode(userID int64) string {
 	b.stateMu.RLock()
 	defer b.stateMu.RUnlock()
 	return b.userMode[userID]
+}
+
+func (b *Bot) setAdminMode(userID int64, mode string) {
+	b.stateMu.Lock()
+	defer b.stateMu.Unlock()
+	if b.adminMode == nil {
+		b.adminMode = make(map[int64]string)
+	}
+	b.adminMode[userID] = mode
+}
+
+func (b *Bot) getAdminMode(userID int64) string {
+	b.stateMu.RLock()
+	defer b.stateMu.RUnlock()
+	if b.adminMode == nil {
+		return ""
+	}
+	return b.adminMode[userID]
+}
+
+func (b *Bot) setPendingBroadcast(userID int64, fromChatID int64, messageID int) {
+	b.stateMu.Lock()
+	defer b.stateMu.Unlock()
+	if b.pendingBC == nil {
+		b.pendingBC = make(map[int64]*pendingBroadcast)
+	}
+	b.pendingBC[userID] = &pendingBroadcast{FromChatID: fromChatID, MessageID: messageID}
+}
+
+func (b *Bot) clearPendingBroadcast(userID int64) {
+	b.stateMu.Lock()
+	defer b.stateMu.Unlock()
+	if b.pendingBC != nil {
+		delete(b.pendingBC, userID)
+	}
+}
+
+func (b *Bot) getPendingBroadcast(userID int64) *pendingBroadcast {
+	b.stateMu.RLock()
+	defer b.stateMu.RUnlock()
+	if b.pendingBC == nil {
+		return nil
+	}
+	return b.pendingBC[userID]
 }
 
 // RateLimiter implements per-user rate limiting
@@ -66,6 +129,9 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 
 // Allow checks if a user can make a request
 func (r *RateLimiter) Allow(userID int64) bool {
+	if r == nil || r.limit <= 0 {
+		return true
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -110,7 +176,7 @@ func NewBot(pb *pocketbase.PocketBase) (*Bot, error) {
 	bot := &Bot{
 		api:         api,
 		pb:          pb,
-		rateLimiter: NewRateLimiter(10, time.Hour), // 10 requests per hour
+		rateLimiter: NewRateLimiter(0, time.Hour),
 		downloads:   NewDownloadManager("./movies"),
 		userMode:    make(map[int64]string),
 		ctx:         ctx,
@@ -205,9 +271,14 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 		}
 	}
 
-	// Rate limiting
-	if !b.rateLimiter.Allow(userID) {
-		b.sendMessage(chatID, "⏳ You've reached the request limit. Please wait before trying again.")
+	// Admin broadcast flow: capture ANY message type
+	if b.isAdmin(userID) && b.getAdminMode(userID) == adminModeAwaitBroadcast {
+		b.setPendingBroadcast(userID, chatID, msg.MessageID)
+		b.setAdminMode(userID, adminModeNone)
+		// show preview by copying back to admin (best-effort)
+		copyCfg := tgbotapi.NewCopyMessage(chatID, chatID, msg.MessageID)
+		_, _ = b.api.Request(copyCfg)
+		b.showBroadcastConfirm(chatID)
 		return
 	}
 
@@ -376,6 +447,49 @@ Enjoy watching! 🍿`
 // handleTextInput processes text input from users
 func (b *Bot) handleTextInput(chatID int64, userID int64, text string) {
 	mode := b.getMode(userID)
+
+	// Global reply-keyboard actions (work regardless of current mode)
+	switch text {
+	case backToMenuButton:
+		b.setMode(userID, modeNone)
+		b.showMainMenu(chatID)
+		return
+	case mainMenuMoviesButton:
+		b.setMode(userID, modeMovies)
+		b.showMoviesMenu(chatID)
+		return
+	case mainMenuSeriesButton:
+		b.setMode(userID, modeSeries)
+		b.showSeriesMenu(chatID)
+		return
+	case mainMenuChannelsButton:
+		b.setMode(userID, modeChannels)
+		b.showChannelsSearch(chatID)
+		return
+	}
+
+	// Admin reply-keyboard actions
+	if b.isAdmin(userID) {
+		switch text {
+		case adminMenuMandatoryChannelsButton:
+			b.showChannelsManagement(chatID)
+			return
+		case adminMenuBroadcastButton:
+			b.promptBroadcast(chatID, userID)
+			return
+		case adminMenuUsersButton:
+			b.showUsersManagement(chatID)
+			return
+		case adminMenuStatsButton:
+			b.showStatistics(chatID)
+			return
+		case adminMenuBackToMenuButton:
+			b.setMode(userID, modeNone)
+			b.showMainMenu(chatID)
+			return
+		}
+	}
+
 	switch mode {
 	case modeChannels:
 		b.searchChannelsByName(chatID, userID, text)
@@ -461,6 +575,42 @@ func isNumericString(s string) bool {
 		}
 	}
 	return len(s) > 0
+}
+
+func (b *Bot) broadcastPending(adminUserID int64) error {
+	p := b.getPendingBroadcast(adminUserID)
+	if p == nil {
+		return fmt.Errorf("no pending broadcast")
+	}
+
+	collection, err := b.pb.FindCollectionByNameOrId("telegram_users")
+	if err != nil {
+		return err
+	}
+
+	records, err := b.pb.FindRecordsByFilter(collection.Id, "is_blocked = false", "", 0, 0)
+	if err != nil {
+		return err
+	}
+
+	for _, r := range records {
+		telegramIDStr := strings.TrimSpace(r.GetString("telegram_id"))
+		if telegramIDStr == "" {
+			continue
+		}
+		telegramID, err := strconv.ParseInt(telegramIDStr, 10, 64)
+		if err != nil || telegramID == 0 {
+			continue
+		}
+
+		copyCfg := tgbotapi.NewCopyMessage(telegramID, p.FromChatID, p.MessageID)
+		_, _ = b.api.Request(copyCfg)
+
+		// small delay to avoid hitting Telegram rate limits
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return nil
 }
 
 // GetAPI returns the bot API (for external use)

@@ -3,6 +3,7 @@ package bot
 import (
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -20,6 +21,13 @@ type TelegramUser struct {
 	IsBlocked   bool   `json:"is_blocked"`
 	CreatedAt   string `json:"created"`
 }
+
+const (
+	mainMenuMoviesButton   = "🎬 Movies"
+	mainMenuSeriesButton   = "📺 TV Series"
+	mainMenuChannelsButton = "🔍 Search TV Channels"
+	backToMenuButton       = "◀️ Back to Menu"
+)
 
 // handleStart handles the /start command
 func (b *Bot) handleStart(chatID int64, from *tgbotapi.User) {
@@ -130,7 +138,7 @@ func (b *Bot) getUser(telegramID int64) (*TelegramUser, error) {
 		return nil, fmt.Errorf("collection not found: %w", err)
 	}
 
-	filter := fmt.Sprintf("telegram_id = %d", telegramID)
+	filter := fmt.Sprintf("telegram_id = \"%d\"", telegramID)
 	records, err := b.pb.FindRecordsByFilter(collection.Id, filter, "", 1, 0)
 	if err != nil {
 		return nil, fmt.Errorf("query failed: %w", err)
@@ -141,13 +149,27 @@ func (b *Bot) getUser(telegramID int64) (*TelegramUser, error) {
 	}
 
 	record := records[0]
+
+	telegramIDStr := strings.TrimSpace(record.GetString("telegram_id"))
+	var parsedTelegramID int64
+	if telegramIDStr != "" {
+		if v, err := strconv.ParseInt(telegramIDStr, 10, 64); err == nil {
+			parsedTelegramID = v
+		}
+	}
+
+	phone := record.GetString("phone")
+	if phone == "" {
+		phone = record.GetString("phone_number")
+	}
+
 	user := &TelegramUser{
 		ID:          record.Id,
-		TelegramID:  int64(record.GetInt("telegram_id")),
+		TelegramID:  parsedTelegramID,
 		Username:    record.GetString("username"),
 		FirstName:   record.GetString("first_name"),
 		LastName:    record.GetString("last_name"),
-		PhoneNumber: record.GetString("phone_number"),
+		PhoneNumber: phone,
 		IsBlocked:   record.GetBool("is_blocked"),
 		CreatedAt:   record.GetString("created"),
 	}
@@ -163,7 +185,7 @@ func (b *Bot) createOrUpdateUser(user *TelegramUser) error {
 	}
 
 	// Check if user exists
-	filter := fmt.Sprintf("telegram_id = %d", user.TelegramID)
+	filter := fmt.Sprintf("telegram_id = \"%d\"", user.TelegramID)
 	records, err := b.pb.FindRecordsByFilter(collection.Id, filter, "", 1, 0)
 	if err != nil {
 		return fmt.Errorf("query failed: %w", err)
@@ -175,17 +197,23 @@ func (b *Bot) createOrUpdateUser(user *TelegramUser) error {
 		record.Set("username", user.Username)
 		record.Set("first_name", user.FirstName)
 		record.Set("last_name", user.LastName)
+		record.Set("phone", user.PhoneNumber)
 		record.Set("phone_number", user.PhoneNumber)
+		if record.GetString("role") == "" {
+			record.Set("role", "user")
+		}
 		return b.pb.Save(record)
 	}
 
 	// Create new user
 	record := core.NewRecord(collection)
-	record.Set("telegram_id", user.TelegramID)
+	record.Set("telegram_id", fmt.Sprintf("%d", user.TelegramID))
 	record.Set("username", user.Username)
 	record.Set("first_name", user.FirstName)
 	record.Set("last_name", user.LastName)
+	record.Set("phone", user.PhoneNumber)
 	record.Set("phone_number", user.PhoneNumber)
+	record.Set("role", "user")
 	record.Set("is_blocked", false)
 
 	return b.pb.Save(record)
@@ -193,20 +221,25 @@ func (b *Bot) createOrUpdateUser(user *TelegramUser) error {
 
 // isAdmin checks if a user is an admin
 func (b *Bot) isAdmin(telegramID int64) bool {
-	collection, err := b.pb.FindCollectionByNameOrId("admins")
+	collection, err := b.pb.FindCollectionByNameOrId("telegram_users")
 	if err != nil {
-		log.Printf("Admins collection not found: %v", err)
+		log.Printf("telegram_users collection not found: %v", err)
 		return false
 	}
 
-	filter := fmt.Sprintf("telegram_id = %d", telegramID)
+	filter := fmt.Sprintf("telegram_id = \"%d\"", telegramID)
 	records, err := b.pb.FindRecordsByFilter(collection.Id, filter, "", 1, 0)
 	if err != nil {
-		log.Printf("Error checking admin: %v", err)
+		log.Printf("Error checking admin role: %v", err)
 		return false
 	}
 
-	return len(records) > 0
+	if len(records) == 0 {
+		return false
+	}
+
+	role := strings.ToLower(strings.TrimSpace(records[0].GetString("role")))
+	return role == "admin"
 }
 
 // showMainMenu displays the main menu
@@ -215,17 +248,18 @@ func (b *Bot) showMainMenu(chatID int64) {
 
 Choose an option below:`
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🎬 Movies", "movies"),
-			tgbotapi.NewInlineKeyboardButtonData("📺 TV Series", "series"),
+	keyboard := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(mainMenuMoviesButton),
+			tgbotapi.NewKeyboardButton(mainMenuSeriesButton),
 		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔍 Search TV Channels", "channels"),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(mainMenuChannelsButton),
 		),
 	)
+	keyboard.ResizeKeyboard = true
 
-	b.sendMessageWithInline(chatID, text, keyboard)
+	b.sendMessageWithKeyboard(chatID, text, keyboard)
 }
 
 // showMoviesMenu displays the movies menu
@@ -239,13 +273,14 @@ Send me:
 
 I'll find and send you the movie!`
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("◀️ Back to Menu", "main_menu"),
+	keyboard := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(backToMenuButton),
 		),
 	)
+	keyboard.ResizeKeyboard = true
 
-	b.sendMessageWithInline(chatID, text, keyboard)
+	b.sendMessageWithKeyboard(chatID, text, keyboard)
 }
 
 // showSeriesMenu displays the TV series menu
@@ -259,13 +294,14 @@ Send me:
 
 I'll show you available seasons and episodes!`
 
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("◀️ Back to Menu", "main_menu"),
+	keyboard := tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton(backToMenuButton),
 		),
 	)
+	keyboard.ResizeKeyboard = true
 
-	b.sendMessageWithInline(chatID, text, keyboard)
+	b.sendMessageWithKeyboard(chatID, text, keyboard)
 }
 
 // showChannelsSearch displays the channels search interface

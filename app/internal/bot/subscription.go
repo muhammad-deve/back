@@ -20,7 +20,8 @@ type MandatoryChannel struct {
 func (b *Bot) getMandatoryChannels() ([]MandatoryChannel, error) {
 	collection, err := b.pb.FindCollectionByNameOrId("mandatory_channels")
 	if err != nil {
-		return nil, fmt.Errorf("collection not found: %w", err)
+		// If the collection doesn't exist, treat it as "no mandatory channels".
+		return []MandatoryChannel{}, nil
 	}
 
 	records, err := b.pb.FindRecordsByFilter(collection.Id, "is_active = true", "", 50, 0)
@@ -105,6 +106,10 @@ func (b *Bot) showSubscriptionRequired(chatID int64, telegramID int64) {
 	if err != nil {
 		log.Printf("Error getting channels: %v", err)
 		b.sendMessage(chatID, "❌ An error occurred. Please try again later.")
+		return
+	}
+	if len(channels) == 0 {
+		b.showMainMenu(chatID)
 		return
 	}
 

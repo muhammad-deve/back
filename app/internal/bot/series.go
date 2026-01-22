@@ -35,7 +35,7 @@ func (b *Bot) displaySeriesSearchResults(chatID int64, series []*Movie) {
 
 		y := s.StartYear
 		text += fmt.Sprintf("%d. <b>%s</b> (%d) ⭐%.1f\n", i+1, s.Title, y, s.Rating)
-		buttonText := fmt.Sprintf("%d. %s", i+1, truncateString(s.Title, 25))
+		buttonText := fmt.Sprintf("%s ⭐%.1f", truncateString(s.Title, 25), s.Rating)
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(buttonText, fmt.Sprintf("series_info:%s", s.ID)),
 		))
