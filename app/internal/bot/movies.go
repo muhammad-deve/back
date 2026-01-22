@@ -207,7 +207,7 @@ func (b *Bot) recordToMovie(record interface{}) *Movie {
 		}
 	}
 
-	return &Movie{
+	m := &Movie{
 		ID:             id,
 		ImdbID:         r.GetString("imdb_id"),
 		TmdbID:         r.GetString("tmdb_id"),
@@ -226,6 +226,49 @@ func (b *Bot) recordToMovie(record interface{}) *Movie {
 		MoviesAPIdURL:  r.GetString("moviesapi_url"),
 		Type:           r.GetString("type"),
 	}
+
+	// Align with current PocketBase schema
+	// - released_year: number
+	// - duration: number (seconds)
+	if y := r.GetInt("released_year"); y > 0 {
+		m.StartYear = y
+	}
+	if d := r.GetInt("duration"); d > 0 {
+		m.RuntimeSeconds = d
+	}
+
+	// posters and video urls are stored in the related "contents" record referenced by content_id
+	contentID := strings.TrimSpace(r.GetString("content_id"))
+	if contentID != "" {
+		if contentRec, err := b.pb.FindRecordById("contents", contentID); err == nil && contentRec != nil {
+			if v := strings.TrimSpace(contentRec.GetString("poster_url")); v != "" {
+				m.PosterURL = v
+			}
+			if v := strings.TrimSpace(contentRec.GetString("vidsrc_url")); v != "" {
+				m.VidsrcURL = v
+			}
+			if v := strings.TrimSpace(contentRec.GetString("vidlink_url")); v != "" {
+				// keep existing field name for backward compatibility
+				m.VidlinkProURL = v
+			}
+			if v := strings.TrimSpace(contentRec.GetString("autoembed_url")); v != "" {
+				m.AutoembedURL = v
+			}
+			if v := strings.TrimSpace(contentRec.GetString("gomo_url")); v != "" {
+				m.GomoURL = v
+			}
+			if v := strings.TrimSpace(contentRec.GetString("moviesapi_url")); v != "" {
+				m.MoviesAPIdURL = v
+			}
+		}
+	}
+
+	// fallback aliases
+	if strings.TrimSpace(m.VidlinkProURL) == "" {
+		m.VidlinkProURL = r.GetString("vidlink_url")
+	}
+
+	return m
 }
 
 func movieBestEmbedURL(movie *Movie) string {
@@ -246,22 +289,40 @@ func movieBestEmbedURL(movie *Movie) string {
 
 // displayMovieInfo displays movie information with inline buttons
 func (b *Bot) displayMovieInfo(chatID int64, userID int64, movie *Movie) {
-	// Truncate plot if too long
-	plot := movie.Plot
-	if len(plot) > 700 {
-		plot = plot[:697] + "..."
+	plot := strings.TrimSpace(movie.Plot)
+	yearText := ""
+	if movie.StartYear > 0 {
+		yearText = fmt.Sprintf(" (%d)", movie.StartYear)
 	}
 
-	text := fmt.Sprintf(`🎬 <b>%s</b>
+	runtime := formatRuntimeSeconds(movie.RuntimeSeconds)
+	qualityLine := ""
+	if q := strings.TrimSpace(movie.Quality); q != "" {
+		qualityLine = fmt.Sprintf("\n📺 Quality: %s", q)
+	}
+
+	prefix := fmt.Sprintf(`🎬 <b>%s</b>%s
 
 ⭐ Rating: %.1f/10
+⏱ Duration: %s
+%s
 
 📝 <b>Description:</b>
-%s`,
+`,
 		movie.Title,
+		yearText,
 		movie.Rating,
-		plot,
+		runtime,
+		qualityLine,
 	)
+
+	captionMax := 950
+	remaining := captionMax - runeLen(prefix)
+	if remaining < 0 {
+		remaining = 0
+	}
+	plot = truncateRunes(plot, remaining)
+	caption := prefix + plot
 
 	// Build inline keyboard
 	var rows [][]tgbotapi.InlineKeyboardButton
@@ -292,16 +353,17 @@ func (b *Bot) displayMovieInfo(chatID int64, userID int64, movie *Movie) {
 	// Send poster if available
 	if movie.PosterURL != "" {
 		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(movie.PosterURL))
-		photo.Caption = text
+		photo.Caption = caption
 		photo.ParseMode = "HTML"
 		photo.ReplyMarkup = keyboard
 		if _, err := b.api.Send(photo); err != nil {
 			// Fallback to text only
 			log.Printf("Failed to send photo: %v", err)
-			b.sendMessageWithInline(chatID, text, keyboard)
+			b.sendMessageWithInline(chatID, caption, keyboard)
+			return
 		}
 	} else {
-		b.sendMessageWithInline(chatID, text, keyboard)
+		b.sendMessageWithInline(chatID, caption, keyboard)
 	}
 
 	// Update watch history
@@ -446,4 +508,37 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen-3] + "..."
+}
+
+func formatRuntimeSeconds(seconds int) string {
+	if seconds <= 0 {
+		return "N/A"
+	}
+	hours := seconds / 3600
+	minutes := (seconds % 3600) / 60
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return "N/A"
+}
+
+func runeLen(s string) int {
+	return len([]rune(s))
+}
+
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max <= 3 {
+		return string(r[:max])
+	}
+	return string(r[:max-3]) + "..."
 }
