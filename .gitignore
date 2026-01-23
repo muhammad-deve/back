@@ -4,3 +4,4 @@ app/artifacts/pb_data/*
 .vscode
 .DS_Store
 /app/.env
+/app/cmd/movies/*
