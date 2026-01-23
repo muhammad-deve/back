@@ -27,6 +27,11 @@ type DownloadManager struct {
 	active    map[string]bool
 }
 
+type DownloadProgress struct {
+	Percent float64
+	ETA     string
+}
+
 // NewDownloadManager creates a new download manager
 func NewDownloadManager(outputDir string) *DownloadManager {
 	os.MkdirAll(outputDir, 0755)
@@ -36,8 +41,16 @@ func NewDownloadManager(outputDir string) *DownloadManager {
 	}
 }
 
+func (dm *DownloadManager) isVerbose() bool {
+	return false
+}
+
 // DownloadVideo downloads a video from VidSrc embed URL
 func (dm *DownloadManager) DownloadVideo(embedURL, title string) (string, error) {
+	return dm.DownloadVideoWithProgress(embedURL, title, nil)
+}
+
+func (dm *DownloadManager) DownloadVideoWithProgress(embedURL, title string, onProgress func(DownloadProgress)) (string, error) {
 	dm.mu.Lock()
 	if dm.active[embedURL] {
 		dm.mu.Unlock()
@@ -52,35 +65,47 @@ func (dm *DownloadManager) DownloadVideo(embedURL, title string) (string, error)
 		dm.mu.Unlock()
 	}()
 
-	log.Printf("[DOWNLOAD] Starting download: %s", title)
+	if dm.isVerbose() {
+		log.Printf("[DOWNLOAD] Starting download: %s", title)
+	}
 
 	// Step 1: Extract iframe
-	log.Println("[STEP 1/3] Extracting iframe...")
+	if dm.isVerbose() {
+		log.Println("[STEP 1/3] Extracting iframe...")
+	}
 	iframeURL, err := getIframeSrc(embedURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to extract iframe: %w", err)
 	}
-	log.Println("✓ Iframe found")
+	if dm.isVerbose() {
+		log.Println("✓ Iframe found")
+	}
 
 	// Step 2: Extract streams
-	log.Println("[STEP 2/3] Finding video streams...")
+	if dm.isVerbose() {
+		log.Println("[STEP 2/3] Finding video streams...")
+	}
 	streams := extractStreams(iframeURL)
 	if len(streams) == 0 {
 		return "", fmt.Errorf("no video streams found")
 	}
-	log.Printf("✓ Found %d stream(s)", len(streams))
+	if dm.isVerbose() {
+		log.Printf("✓ Found %d stream(s)", len(streams))
+	}
 
 	streams = prioritizeStreams(streams)
 
 	// Step 3: Download with ffmpeg
-	log.Println("[STEP 3/3] Downloading video...")
+	if dm.isVerbose() {
+		log.Println("[STEP 3/3] Downloading video...")
+	}
 
 	// Clean title for filename
 	safeTitle := sanitizeFilename(title)
 	outputFile := filepath.Join(dm.outputDir, fmt.Sprintf("%s_%d.mp4", safeTitle, time.Now().Unix()))
 
 	for _, stream := range streams {
-		if downloadWithFFmpeg(stream, iframeURL, outputFile) {
+		if downloadWithFFmpeg(stream, iframeURL, outputFile, onProgress, dm.isVerbose()) {
 			return outputFile, nil
 		}
 	}
@@ -224,7 +249,7 @@ func extractStreams(iframeURL string) []string {
 }
 
 // downloadWithFFmpeg downloads the stream using ffmpeg
-func downloadWithFFmpeg(streamURL, referer, outputFile string) bool {
+func downloadWithFFmpeg(streamURL, referer, outputFile string, onProgress func(DownloadProgress), verbose bool) bool {
 	if !commandExists("ffmpeg") {
 		log.Println("❌ ffmpeg not installed")
 		return false
@@ -258,6 +283,7 @@ func downloadWithFFmpeg(streamURL, referer, outputFile string) bool {
 	var totalDuration float64
 	startTime := time.Now()
 	lastUpdate := time.Now()
+	lastPercent := -1.0
 
 	timeRegex := regexp.MustCompile(`time=(\d+):(\d+):(\d+\.\d+)`)
 	durationRegex := regexp.MustCompile(`Duration: (\d+):(\d+):(\d+\.\d+)`)
@@ -296,7 +322,14 @@ func downloadWithFFmpeg(streamURL, referer, outputFile string) bool {
 					eta = "calculating..."
 				}
 
-				log.Printf("📥 %.1f%% | ETA: %s", percentage, eta)
+				if onProgress != nil {
+					if lastPercent < 0 || percentage-lastPercent >= 0.1 {
+						lastPercent = percentage
+						onProgress(DownloadProgress{Percent: percentage, ETA: eta})
+					}
+				} else if verbose {
+					log.Printf("📥 %.1f%% | ETA: %s", percentage, eta)
+				}
 			}
 		}
 	}
@@ -304,13 +337,17 @@ func downloadWithFFmpeg(streamURL, referer, outputFile string) bool {
 	err = cmd.Wait()
 
 	if err != nil {
-		log.Println("Retrying with re-encode...")
+		if verbose {
+			log.Println("Retrying with re-encode...")
+		}
 		return downloadReencode(streamURL, referer, outputFile)
 	}
 
 	if fileExists(outputFile) && getFileSize(outputFile) > 500000 {
 		size := float64(getFileSize(outputFile)) / 1024 / 1024
-		log.Printf("✅ SUCCESS! %s (%.1f MB)", filepath.Base(outputFile), size)
+		if verbose {
+			log.Printf("✅ SUCCESS! %s (%.1f MB)", filepath.Base(outputFile), size)
+		}
 		return true
 	}
 

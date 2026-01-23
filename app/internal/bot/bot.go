@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -388,6 +389,38 @@ func (b *Bot) sendMessage(chatID int64, text string) {
 	if _, err := b.api.Send(msg); err != nil {
 		log.Printf("❌ Failed to send message: %v", err)
 	}
+}
+
+func progressBar(percent float64) string {
+	if percent < 0 {
+		percent = 0
+	}
+	if percent > 100 {
+		percent = 100
+	}
+	total := 10
+	filled := int(math.Round(percent / 10))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > total {
+		filled = total
+	}
+
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", total-filled)
+	return fmt.Sprintf("[%s]", bar)
+}
+
+func downloadProgressText(title string, p DownloadProgress) string {
+	name := strings.TrimSpace(title)
+	if name == "" {
+		name = "video"
+	}
+	eta := strings.TrimSpace(p.ETA)
+	if eta == "" {
+		eta = "calculating..."
+	}
+	return fmt.Sprintf("⏳ Downloading %s...\n%s %.1f%%\nETA: %s", name, progressBar(p.Percent), p.Percent, eta)
 }
 
 // sendMessageWithKeyboard sends a message with a reply keyboard

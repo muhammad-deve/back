@@ -5,7 +5,9 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/pocketbase/pocketbase/core"
@@ -442,36 +444,90 @@ func (b *Bot) handleWatchMovie(chatID int64, userID int64, movieID string) {
 		return
 	}
 
-	b.sendMessage(chatID, "⏳ Downloading video... This may take several minutes.")
+	statusMsg, err := b.api.Send(tgbotapi.NewMessage(chatID, downloadProgressText(movie.Title, DownloadProgress{Percent: 0, ETA: "calculating..."})))
+	if err != nil {
+		b.sendMessage(chatID, "⏳ Downloading video... This may take several minutes.")
+		statusMsg.MessageID = 0
+	}
 
 	// Start download in background
 	go func() {
-		videoPath, err := b.downloads.DownloadVideo(embedURL, movie.Title)
+		lastEdit := time.Now()
+		lastPercent := -1.0
+		videoPath, err := b.downloads.DownloadVideoWithProgress(embedURL, movie.Title, func(p DownloadProgress) {
+			if statusMsg.MessageID == 0 {
+				return
+			}
+			if time.Since(lastEdit) < 1200*time.Millisecond && (lastPercent >= 0 && p.Percent-lastPercent < 1.0) {
+				return
+			}
+			lastEdit = time.Now()
+			lastPercent = p.Percent
+			edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, downloadProgressText(movie.Title, p))
+			_, _ = b.api.Send(edit)
+		})
 		if err != nil {
 			log.Printf("Download failed: %v", err)
+			if statusMsg.MessageID != 0 {
+				edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, fmt.Sprintf("❌ Download failed: %v", err))
+				_, _ = b.api.Send(edit)
+				return
+			}
 			b.sendMessage(chatID, fmt.Sprintf("❌ Download failed: %v", err))
 			return
 		}
 
-		// Send video file
-		b.sendMessage(chatID, "📤 Sending video...")
-		if err := b.sendVideoFile(chatID, videoPath, movie.Title); err != nil {
-			log.Printf("Failed to send video: %v", err)
-			b.sendMessage(chatID, "❌ Failed to send video. File might be too large.")
-			return
+		if statusMsg.MessageID != 0 {
+			edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, "📤 Uploading to Telegram...")
+			_, _ = b.api.Send(edit)
 		}
 
-		b.sendMessage(chatID, "✅ Enjoy watching! 🍿")
+		if err := b.sendVideoFile(chatID, videoPath, movie.Title); err != nil {
+			log.Printf("Failed to send video: %v", err)
+			watchURL := fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)
+			b.sendMessage(chatID, fmt.Sprintf("❌ Failed to send video.\n\n🌐 Watch online: %s", watchURL))
+			return
+		}
+		if statusMsg.MessageID != 0 {
+			_, _ = b.api.Send(tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, "✅ Sent!"))
+		}
 	}()
 }
 
 // sendVideoFile sends a video file to the user
 func (b *Bot) sendVideoFile(chatID int64, filePath string, title string) error {
+	if maxBytes := telegramUploadMaxBytes(); maxBytes > 0 {
+		if info, err := os.Stat(filePath); err == nil {
+			if info.Size() > maxBytes {
+				mb := float64(info.Size()) / 1024 / 1024
+				return fmt.Errorf("file too large for Telegram upload (%.1f MB)", mb)
+			}
+		}
+	}
+
 	video := tgbotapi.NewVideo(chatID, tgbotapi.FilePath(filePath))
 	video.Caption = fmt.Sprintf("🎬 %s", title)
+	video.SupportsStreaming = true
 
-	_, err := b.api.Send(video)
+	if _, err := b.api.Send(video); err == nil {
+		return nil
+	}
+
+	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
+	doc.Caption = fmt.Sprintf("🎬 %s", title)
+	_, err := b.api.Send(doc)
 	return err
+}
+
+func telegramUploadMaxBytes() int64 {
+	// If set, allows you to pre-check and skip uploads that will likely fail.
+	// If not set, we won't block uploads and will let Telegram decide.
+	if v := strings.TrimSpace(os.Getenv("TELEGRAM_UPLOAD_MAX_MB")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n * 1024 * 1024
+		}
+	}
+	return 0
 }
 
 // updateWatchHistory records a movie view in watch history

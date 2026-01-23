@@ -1,13 +1,111 @@
 package bot
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strconv"
+	"strings"
+	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/pocketbase/pocketbase/core"
 )
+
+type imdbSeasonInfo struct {
+	Season       int
+	EpisodeCount int
+}
+
+type imdbSeasonsResponse struct {
+	Seasons []struct {
+		Season       string `json:"season"`
+		EpisodeCount int    `json:"episodeCount"`
+	} `json:"seasons"`
+}
+
+type cachedSeasons struct {
+	items     []imdbSeasonInfo
+	fetchedAt time.Time
+}
+
+var (
+	seasonsCacheMu sync.Mutex
+	seasonsCache   = map[string]cachedSeasons{}
+)
+
+func fetchImdbSeasons(imdbID string) ([]imdbSeasonInfo, error) {
+	imdbID = strings.TrimSpace(imdbID)
+	if imdbID == "" {
+		return nil, fmt.Errorf("missing imdb id")
+	}
+
+	url := fmt.Sprintf("https://api.imdbapi.dev/titles/%s/seasons", imdbID)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "MoviesBot/1.0")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("imdb seasons http %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	var parsed imdbSeasonsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return nil, err
+	}
+
+	out := make([]imdbSeasonInfo, 0, len(parsed.Seasons))
+	for _, s := range parsed.Seasons {
+		seasonNum, err := strconv.Atoi(strings.TrimSpace(s.Season))
+		if err != nil {
+			continue
+		}
+		out = append(out, imdbSeasonInfo{Season: seasonNum, EpisodeCount: s.EpisodeCount})
+	}
+
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no seasons returned")
+	}
+
+	return out, nil
+}
+
+func getImdbSeasonsCached(imdbID string) []imdbSeasonInfo {
+	imdbID = strings.TrimSpace(imdbID)
+	if imdbID == "" {
+		return nil
+	}
+
+	seasonsCacheMu.Lock()
+	defer seasonsCacheMu.Unlock()
+
+	if c, ok := seasonsCache[imdbID]; ok {
+		if time.Since(c.fetchedAt) < 6*time.Hour {
+			return c.items
+		}
+	}
+
+	items, err := fetchImdbSeasons(imdbID)
+	if err != nil {
+		return nil
+	}
+
+	seasonsCache[imdbID] = cachedSeasons{items: items, fetchedAt: time.Now()}
+	return items
+}
 
 // Series represents a TV series (extends Movie type)
 type Series struct {
@@ -96,15 +194,34 @@ Select a season:`,
 		plot,
 	)
 
-	// Get season count (default to 10 if unknown, can be refined later)
+	seasonsInfo := getImdbSeasonsCached(series.ImdbID)
 	totalSeasons := 10
+	seasonToEpisodes := map[int]int{}
+	if len(seasonsInfo) > 0 {
+		maxSeason := 0
+		for _, s := range seasonsInfo {
+			if s.Season > maxSeason {
+				maxSeason = s.Season
+			}
+			if s.Season > 0 && s.EpisodeCount > 0 {
+				seasonToEpisodes[s.Season] = s.EpisodeCount
+			}
+		}
+		if maxSeason > 0 {
+			totalSeasons = maxSeason
+		}
+	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
 
 	for season := 1; season <= totalSeasons; season++ {
+		label := fmt.Sprintf("Season %d", season)
+		if c, ok := seasonToEpisodes[season]; ok {
+			label = fmt.Sprintf("S%d (%d)", season, c)
+		}
 		button := tgbotapi.NewInlineKeyboardButtonData(
-			fmt.Sprintf("Season %d", season),
+			label,
 			fmt.Sprintf("season:%s:%d", series.ID, season),
 		)
 		row = append(row, button)
@@ -161,8 +278,16 @@ func (b *Bot) displayEpisodeList(chatID int64, userID int64, series *Movie, seas
 
 Select an episode:`, series.Title, season)
 
-	// Default to 20 episodes per season (can be refined with actual data)
+	// Default to 20 episodes per season if API fails
 	totalEpisodes := 20
+	if seasonsInfo := getImdbSeasonsCached(series.ImdbID); len(seasonsInfo) > 0 {
+		for _, s := range seasonsInfo {
+			if s.Season == season && s.EpisodeCount > 0 {
+				totalEpisodes = s.EpisodeCount
+				break
+			}
+		}
+	}
 
 	var rows [][]tgbotapi.InlineKeyboardButton
 	var row []tgbotapi.InlineKeyboardButton
@@ -261,26 +386,54 @@ func (b *Bot) handleWatchEpisode(chatID int64, userID int64, seriesID, seasonStr
 	embedURL := fmt.Sprintf("https://vidsrc-embed.ru/embed/%s/%d-%d", series.ImdbID, season, episode)
 	title := fmt.Sprintf("%s S%02dE%02d", series.Title, season, episode)
 
-	b.sendMessage(chatID, "⏳ Downloading episode... This may take several minutes.")
+	statusMsg, err := b.api.Send(tgbotapi.NewMessage(chatID, downloadProgressText(title, DownloadProgress{Percent: 0, ETA: "calculating..."})))
+	if err != nil {
+		b.sendMessage(chatID, "⏳ Downloading episode... This may take several minutes.")
+		statusMsg.MessageID = 0
+	}
 
 	// Start download in background
 	go func() {
-		videoPath, err := b.downloads.DownloadVideo(embedURL, title)
+		lastEdit := time.Now()
+		lastPercent := -1.0
+		videoPath, err := b.downloads.DownloadVideoWithProgress(embedURL, title, func(p DownloadProgress) {
+			if statusMsg.MessageID == 0 {
+				return
+			}
+			if time.Since(lastEdit) < 1200*time.Millisecond && (lastPercent >= 0 && p.Percent-lastPercent < 1.0) {
+				return
+			}
+			lastEdit = time.Now()
+			lastPercent = p.Percent
+			edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, downloadProgressText(title, p))
+			_, _ = b.api.Send(edit)
+		})
 		if err != nil {
 			log.Printf("Download failed: %v", err)
+			if statusMsg.MessageID != 0 {
+				edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, fmt.Sprintf("❌ Download failed: %v", err))
+				_, _ = b.api.Send(edit)
+				return
+			}
 			b.sendMessage(chatID, fmt.Sprintf("❌ Download failed: %v", err))
 			return
 		}
 
-		// Send video file
-		b.sendMessage(chatID, "📤 Sending video...")
+		if statusMsg.MessageID != 0 {
+			edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, "📤 Uploading to Telegram...")
+			_, _ = b.api.Send(edit)
+		}
+
 		if err := b.sendVideoFile(chatID, videoPath, title); err != nil {
 			log.Printf("Failed to send video: %v", err)
-			b.sendMessage(chatID, "❌ Failed to send video. File might be too large.")
+			watchURL := fmt.Sprintf("%s/series/%s/%d/%d", websiteBaseURL(), series.ImdbID, season, episode)
+			b.sendMessage(chatID, fmt.Sprintf("❌ Failed to send video.\n\n🌐 Watch online: %s", watchURL))
 			return
 		}
 
-		b.sendMessage(chatID, "✅ Enjoy watching! 🍿")
+		if statusMsg.MessageID != 0 {
+			_, _ = b.api.Send(tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, "✅ Sent!"))
+		}
 
 		// Update watch history
 		b.updateSeriesWatchHistory(userID, series.ID, season, episode)
