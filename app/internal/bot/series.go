@@ -348,13 +348,10 @@ Ready to watch?`, series.Title, season, episode)
 		tgbotapi.NewInlineKeyboardButtonURL("🌐 Watch on Website", websiteURL),
 	))
 
-	// Download button for admins
+	// Watch without ads button (admins only)
 	if b.isAdmin(userID) {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(
-				"📥 Download Video",
-				fmt.Sprintf("watch_episode:%s:%d:%d", series.ID, season, episode),
-			),
+			tgbotapi.NewInlineKeyboardButtonURL("� Watch without ads", embedURL),
 		))
 	}
 
@@ -382,62 +379,13 @@ func (b *Bot) handleWatchEpisode(chatID int64, userID int64, seriesID, seasonStr
 		return
 	}
 
-	// Build VidSrc URL for episode
-	embedURL := fmt.Sprintf("https://vidsrc-embed.ru/embed/%s/%d-%d", series.ImdbID, season, episode)
-	title := fmt.Sprintf("%s S%02dE%02d", series.Title, season, episode)
-
-	statusMsg, err := b.api.Send(tgbotapi.NewMessage(chatID, downloadProgressText(title, DownloadProgress{Percent: 0, ETA: "calculating..."})))
-	if err != nil {
-		b.sendMessage(chatID, "⏳ Downloading episode... This may take several minutes.")
-		statusMsg.MessageID = 0
+	watchURL := fmt.Sprintf("%s/series/%s/%d/%d", websiteBaseURL(), series.ImdbID, season, episode)
+	msg := fmt.Sprintf("🌐 Watch online: %s", watchURL)
+	if b.isAdmin(userID) {
+		embedURL := fmt.Sprintf("https://vidsrc-embed.ru/embed/%s/%d-%d", series.ImdbID, season, episode)
+		msg = fmt.Sprintf("%s\n🚫 Watch without ads: %s", msg, embedURL)
 	}
-
-	// Start download in background
-	go func() {
-		lastEdit := time.Now()
-		lastPercent := -1.0
-		videoPath, err := b.downloads.DownloadVideoWithProgress(embedURL, title, func(p DownloadProgress) {
-			if statusMsg.MessageID == 0 {
-				return
-			}
-			if time.Since(lastEdit) < 1200*time.Millisecond && (lastPercent >= 0 && p.Percent-lastPercent < 1.0) {
-				return
-			}
-			lastEdit = time.Now()
-			lastPercent = p.Percent
-			edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, downloadProgressText(title, p))
-			_, _ = b.api.Send(edit)
-		})
-		if err != nil {
-			log.Printf("Download failed: %v", err)
-			if statusMsg.MessageID != 0 {
-				edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, fmt.Sprintf("❌ Download failed: %v", err))
-				_, _ = b.api.Send(edit)
-				return
-			}
-			b.sendMessage(chatID, fmt.Sprintf("❌ Download failed: %v", err))
-			return
-		}
-
-		if statusMsg.MessageID != 0 {
-			edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, "📤 Uploading to Telegram...")
-			_, _ = b.api.Send(edit)
-		}
-
-		if err := b.sendVideoFile(chatID, videoPath, title); err != nil {
-			log.Printf("Failed to send video: %v", err)
-			watchURL := fmt.Sprintf("%s/series/%s/%d/%d", websiteBaseURL(), series.ImdbID, season, episode)
-			b.sendMessage(chatID, fmt.Sprintf("❌ Failed to send video.\n\n🌐 Watch online: %s", watchURL))
-			return
-		}
-
-		if statusMsg.MessageID != 0 {
-			_, _ = b.api.Send(tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, "✅ Sent!"))
-		}
-
-		// Update watch history
-		b.updateSeriesWatchHistory(userID, series.ID, season, episode)
-	}()
+	b.sendMessage(chatID, msg)
 }
 
 // updateSeriesWatchHistory records a series episode view

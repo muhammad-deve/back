@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/pocketbase/pocketbase/core"
@@ -334,10 +333,6 @@ func (b *Bot) displayMovieInfo(chatID int64, userID int64, movie *Movie) {
 		tgbotapi.NewInlineKeyboardButtonURL("🌐 Watch online", fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)),
 	))
 
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("📥 Download", fmt.Sprintf("watch_movie:%s", movie.ID)),
-	))
-
 	if b.isAdmin(userID) {
 		if u := movieBestEmbedURL(movie); u != "" {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
@@ -431,67 +426,14 @@ func (b *Bot) handleWatchMovie(chatID int64, userID int64, movieID string) {
 		return
 	}
 
-	// Get embed URL
-	embedURL := movie.VidsrcURL
-	if embedURL == "" {
-		embedURL = movie.VidlinkProURL
-	}
-	if embedURL == "" {
-		embedURL = movie.AutoembedURL
-	}
-	if embedURL == "" {
-		b.sendMessage(chatID, "❌ No video source available for this movie.")
-		return
-	}
-
-	statusMsg, err := b.api.Send(tgbotapi.NewMessage(chatID, downloadProgressText(movie.Title, DownloadProgress{Percent: 0, ETA: "calculating..."})))
-	if err != nil {
-		b.sendMessage(chatID, "⏳ Downloading video... This may take several minutes.")
-		statusMsg.MessageID = 0
-	}
-
-	// Start download in background
-	go func() {
-		lastEdit := time.Now()
-		lastPercent := -1.0
-		videoPath, err := b.downloads.DownloadVideoWithProgress(embedURL, movie.Title, func(p DownloadProgress) {
-			if statusMsg.MessageID == 0 {
-				return
-			}
-			if time.Since(lastEdit) < 1200*time.Millisecond && (lastPercent >= 0 && p.Percent-lastPercent < 1.0) {
-				return
-			}
-			lastEdit = time.Now()
-			lastPercent = p.Percent
-			edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, downloadProgressText(movie.Title, p))
-			_, _ = b.api.Send(edit)
-		})
-		if err != nil {
-			log.Printf("Download failed: %v", err)
-			if statusMsg.MessageID != 0 {
-				edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, fmt.Sprintf("❌ Download failed: %v", err))
-				_, _ = b.api.Send(edit)
-				return
-			}
-			b.sendMessage(chatID, fmt.Sprintf("❌ Download failed: %v", err))
-			return
+	watchURL := fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)
+	msg := fmt.Sprintf("🌐 Watch online: %s", watchURL)
+	if b.isAdmin(userID) {
+		if u := movieBestEmbedURL(movie); u != "" {
+			msg = fmt.Sprintf("%s\n� Watch without ads: %s", msg, u)
 		}
-
-		if statusMsg.MessageID != 0 {
-			edit := tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, "📤 Uploading to Telegram...")
-			_, _ = b.api.Send(edit)
-		}
-
-		if err := b.sendVideoFile(chatID, videoPath, movie.Title); err != nil {
-			log.Printf("Failed to send video: %v", err)
-			watchURL := fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)
-			b.sendMessage(chatID, fmt.Sprintf("❌ Failed to send video.\n\n🌐 Watch online: %s", watchURL))
-			return
-		}
-		if statusMsg.MessageID != 0 {
-			_, _ = b.api.Send(tgbotapi.NewEditMessageText(chatID, statusMsg.MessageID, "✅ Sent!"))
-		}
-	}()
+	}
+	b.sendMessage(chatID, msg)
 }
 
 // sendVideoFile sends a video file to the user
