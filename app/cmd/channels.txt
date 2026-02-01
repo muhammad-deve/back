@@ -379,10 +379,6 @@ func main() {
 		},
 	}
 
-
-
-
-
 	channelsCmd.Flags().String("pb-url", envOrDefault("PB_URL", "http://127.0.0.1:8090"), "PocketBase base URL")
 	channelsCmd.Flags().String("email", envOrDefault("PB_SUPERUSER_EMAIL", ""), "PocketBase superuser email")
 	channelsCmd.Flags().String("password", envOrDefault("PB_SUPERUSER_PASSWORD", ""), "PocketBase superuser password")
