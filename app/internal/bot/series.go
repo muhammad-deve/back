@@ -351,7 +351,7 @@ Ready to watch?`, series.Title, season, episode)
 	// Watch without ads button (admins only)
 	if b.isAdmin(userID) {
 		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("� Watch without ads", embedURL),
+			tgbotapi.NewInlineKeyboardButtonData("🚫 Watch without ads", fmt.Sprintf("noads_episode:%s:%d:%d", series.ID, season, episode)),
 		))
 	}
 
@@ -380,12 +380,7 @@ func (b *Bot) handleWatchEpisode(chatID int64, userID int64, seriesID, seasonStr
 	}
 
 	watchURL := fmt.Sprintf("%s/series/%s/%d/%d", websiteBaseURL(), series.ImdbID, season, episode)
-	msg := fmt.Sprintf("🌐 Watch online: %s", watchURL)
-	if b.isAdmin(userID) {
-		embedURL := fmt.Sprintf("https://vidsrc-embed.ru/embed/%s/%d-%d", series.ImdbID, season, episode)
-		msg = fmt.Sprintf("%s\n🚫 Watch without ads: %s", msg, embedURL)
-	}
-	b.sendMessage(chatID, msg)
+	b.sendMessage(chatID, fmt.Sprintf("🌐 Watch online: %s", watchURL))
 }
 
 // updateSeriesWatchHistory records a series episode view

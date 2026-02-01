@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -149,6 +150,12 @@ func getIframeSrc(embedURL string) (string, error) {
 
 // extractStreams uses headless Chrome to capture video stream URLs
 func extractStreams(iframeURL string) []string {
+	// Suppress chromedp logging errors (cookie parsing, navigation events)
+	// These are harmless and don't affect video extraction
+	oldLog := log.Writer()
+	log.SetOutput(io.Discard)
+	defer log.SetOutput(oldLog)
+
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", true),
 		chromedp.Flag("no-sandbox", true),

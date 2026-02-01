@@ -325,24 +325,24 @@ func (b *Bot) displayMovieInfo(chatID int64, userID int64, movie *Movie) {
 	plot = truncateRunes(plot, remaining)
 	caption := prefix + plot
 
-	// Build inline keyboard
+	// Build inline keyboard with improved UI
 	var rows [][]tgbotapi.InlineKeyboardButton
 
-	// Watch button - all users get website link
+	// Watch button - all users get website link with clear, pressable text
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonURL("🌐 Watch online", fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)),
+		tgbotapi.NewInlineKeyboardButtonURL("▶️ WATCH ONLINE", fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)),
 	))
 
 	if b.isAdmin(userID) {
 		if u := movieBestEmbedURL(movie); u != "" {
 			rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-				tgbotapi.NewInlineKeyboardButtonURL("🚫 Watch without ads", u),
+				tgbotapi.NewInlineKeyboardButtonData("🎬 AD-FREE VERSION", fmt.Sprintf("noads_movie:%s", movie.ID)),
 			))
 		}
 	}
 
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-		tgbotapi.NewInlineKeyboardButtonData("◀️ Back to Menu", "main_menu"),
+		tgbotapi.NewInlineKeyboardButtonData("🏠 BACK TO MENU", "main_menu"),
 	))
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -427,38 +427,7 @@ func (b *Bot) handleWatchMovie(chatID int64, userID int64, movieID string) {
 	}
 
 	watchURL := fmt.Sprintf("%s/movie/%s", websiteBaseURL(), movie.ImdbID)
-	msg := fmt.Sprintf("🌐 Watch online: %s", watchURL)
-	if b.isAdmin(userID) {
-		if u := movieBestEmbedURL(movie); u != "" {
-			msg = fmt.Sprintf("%s\n� Watch without ads: %s", msg, u)
-		}
-	}
-	b.sendMessage(chatID, msg)
-}
-
-// sendVideoFile sends a video file to the user
-func (b *Bot) sendVideoFile(chatID int64, filePath string, title string) error {
-	if maxBytes := telegramUploadMaxBytes(); maxBytes > 0 {
-		if info, err := os.Stat(filePath); err == nil {
-			if info.Size() > maxBytes {
-				mb := float64(info.Size()) / 1024 / 1024
-				return fmt.Errorf("file too large for Telegram upload (%.1f MB)", mb)
-			}
-		}
-	}
-
-	video := tgbotapi.NewVideo(chatID, tgbotapi.FilePath(filePath))
-	video.Caption = fmt.Sprintf("🎬 %s", title)
-	video.SupportsStreaming = true
-
-	if _, err := b.api.Send(video); err == nil {
-		return nil
-	}
-
-	doc := tgbotapi.NewDocument(chatID, tgbotapi.FilePath(filePath))
-	doc.Caption = fmt.Sprintf("🎬 %s", title)
-	_, err := b.api.Send(doc)
-	return err
+	b.sendMessage(chatID, fmt.Sprintf("🌐 Watch online: %s", watchURL))
 }
 
 func telegramUploadMaxBytes() int64 {

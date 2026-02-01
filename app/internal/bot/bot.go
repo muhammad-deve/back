@@ -21,6 +21,7 @@ type Bot struct {
 	pb          *pocketbase.PocketBase
 	rateLimiter *RateLimiter
 	downloads   *DownloadManager
+	stream      *StreamServer
 	stateMu     sync.RWMutex
 	userMode    map[int64]string
 	adminMode   map[int64]string
@@ -179,14 +180,31 @@ func NewBot(pb *pocketbase.PocketBase) (*Bot, error) {
 		pb:          pb,
 		rateLimiter: NewRateLimiter(0, time.Hour),
 		downloads:   NewDownloadManager("./movies"),
+		stream:      NewStreamServer(streamListenAddr(), streamBaseURL(), "./hls"),
 		userMode:    make(map[int64]string),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
 
+	bot.stream.Start()
+
 	log.Printf("🤖 Bot authorized on account %s", api.Self.UserName)
 
 	return bot, nil
+}
+
+func streamListenAddr() string {
+	if v := strings.TrimSpace(os.Getenv("STREAM_LISTEN_ADDR")); v != "" {
+		return v
+	}
+	return ":3002"
+}
+
+func streamBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("STREAM_BASE_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return "http://localhost:3002"
 }
 
 // Start begins processing updates
@@ -356,6 +374,10 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 		if len(parts) > 1 {
 			b.handleWatchMovie(chatID, userID, parts[1])
 		}
+	case "noads_movie":
+		if len(parts) > 1 {
+			b.handleNoAdsMovie(chatID, userID, parts[1])
+		}
 	case "series_info":
 		if len(parts) > 1 {
 			b.handleSeriesInfo(chatID, userID, parts[1])
@@ -371,6 +393,10 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 	case "watch_episode":
 		if len(parts) > 3 {
 			b.handleWatchEpisode(chatID, userID, parts[1], parts[2], parts[3])
+		}
+	case "noads_episode":
+		if len(parts) > 3 {
+			b.handleNoAdsEpisode(chatID, userID, parts[1], parts[2], parts[3])
 		}
 	// Admin callbacks
 	case "admin":
