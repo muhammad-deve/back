@@ -148,18 +148,45 @@ func (b *Bot) displaySeriesSearchResults(chatID int64, series []*Movie) {
 }
 
 // handleSeriesInfo displays series information
-func (b *Bot) handleSeriesInfo(chatID int64, userID int64, seriesID string) {
+func (b *Bot) handleSeriesInfo(chatID int64, userID int64, messageID int, useCaption bool, seriesID string) {
 	movie, err := b.findMovieByID(seriesID)
 	if err != nil {
 		b.sendMessage(chatID, "❌ Series not found.")
 		return
 	}
 
-	b.displaySeriesInfo(chatID, userID, movie)
+	b.displaySeriesInfoInPlace(chatID, messageID, useCaption, userID, movie)
+}
+
+func (b *Bot) displaySeriesInfoInPlace(chatID int64, messageID int, useCaption bool, userID int64, series *Movie) {
+	text, keyboard := b.buildSeriesInfoMessage(userID, series)
+	if useCaption {
+		b.editMessageCaptionWithInline(chatID, messageID, text, keyboard)
+		return
+	}
+	b.editMessageWithInline(chatID, messageID, text, keyboard)
 }
 
 // displaySeriesInfo shows series details with season selection
 func (b *Bot) displaySeriesInfo(chatID int64, userID int64, series *Movie) {
+	text, keyboard := b.buildSeriesInfoMessage(userID, series)
+
+	// Send poster if available
+	if series.PosterURL != "" {
+		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(series.PosterURL))
+		photo.Caption = text
+		photo.ParseMode = "HTML"
+		photo.ReplyMarkup = keyboard
+		if _, err := b.api.Send(photo); err != nil {
+			log.Printf("Failed to send photo: %v", err)
+			b.sendMessageWithInline(chatID, text, keyboard)
+		}
+		return
+	}
+	b.sendMessageWithInline(chatID, text, keyboard)
+}
+
+func (b *Bot) buildSeriesInfoMessage(userID int64, series *Movie) (string, tgbotapi.InlineKeyboardMarkup) {
 	// Format runtime if available
 	var runtime string
 	if series.RuntimeSeconds > 0 {
@@ -238,24 +265,11 @@ Select a season:`,
 	))
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
-
-	// Send poster if available
-	if series.PosterURL != "" {
-		photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(series.PosterURL))
-		photo.Caption = text
-		photo.ParseMode = "HTML"
-		photo.ReplyMarkup = keyboard
-		if _, err := b.api.Send(photo); err != nil {
-			log.Printf("Failed to send photo: %v", err)
-			b.sendMessageWithInline(chatID, text, keyboard)
-		}
-	} else {
-		b.sendMessageWithInline(chatID, text, keyboard)
-	}
+	return text, keyboard
 }
 
 // handleSeasonSelection displays episodes for a selected season
-func (b *Bot) handleSeasonSelection(chatID int64, userID int64, seriesID string, seasonStr string) {
+func (b *Bot) handleSeasonSelection(chatID int64, userID int64, messageID int, useCaption bool, seriesID string, seasonStr string) {
 	season, err := strconv.Atoi(seasonStr)
 	if err != nil {
 		b.sendMessage(chatID, "❌ Invalid season.")
@@ -268,11 +282,25 @@ func (b *Bot) handleSeasonSelection(chatID int64, userID int64, seriesID string,
 		return
 	}
 
-	b.displayEpisodeList(chatID, userID, series, season)
+	b.displayEpisodeListInPlace(chatID, messageID, useCaption, userID, series, season)
+}
+
+func (b *Bot) displayEpisodeListInPlace(chatID int64, messageID int, useCaption bool, userID int64, series *Movie, season int) {
+	text, keyboard := b.buildEpisodeListMessage(userID, series, season)
+	if useCaption {
+		b.editMessageCaptionWithInline(chatID, messageID, text, keyboard)
+		return
+	}
+	b.editMessageWithInline(chatID, messageID, text, keyboard)
 }
 
 // displayEpisodeList shows episodes for a season
 func (b *Bot) displayEpisodeList(chatID int64, userID int64, series *Movie, season int) {
+	text, keyboard := b.buildEpisodeListMessage(userID, series, season)
+	b.sendMessageWithInline(chatID, text, keyboard)
+}
+
+func (b *Bot) buildEpisodeListMessage(userID int64, series *Movie, season int) (string, tgbotapi.InlineKeyboardMarkup) {
 	text := fmt.Sprintf(`📺 <b>%s</b>
 📁 Season %d
 
@@ -313,11 +341,11 @@ Select an episode:`, series.Title, season)
 	))
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
-	b.sendMessageWithInline(chatID, text, keyboard)
+	return text, keyboard
 }
 
 // handleEpisodeSelection displays episode info and options
-func (b *Bot) handleEpisodeSelection(chatID int64, userID int64, seriesID, seasonStr, episodeStr string) {
+func (b *Bot) handleEpisodeSelection(chatID int64, userID int64, messageID int, useCaption bool, seriesID, seasonStr, episodeStr string) {
 	season, _ := strconv.Atoi(seasonStr)
 	episode, _ := strconv.Atoi(episodeStr)
 
@@ -327,11 +355,25 @@ func (b *Bot) handleEpisodeSelection(chatID int64, userID int64, seriesID, seaso
 		return
 	}
 
-	b.displayEpisodeInfo(chatID, userID, series, season, episode)
+	b.displayEpisodeInfoInPlace(chatID, messageID, useCaption, userID, series, season, episode)
+}
+
+func (b *Bot) displayEpisodeInfoInPlace(chatID int64, messageID int, useCaption bool, userID int64, series *Movie, season, episode int) {
+	text, keyboard := b.buildEpisodeInfoMessage(userID, series, season, episode)
+	if useCaption {
+		b.editMessageCaptionWithInline(chatID, messageID, text, keyboard)
+		return
+	}
+	b.editMessageWithInline(chatID, messageID, text, keyboard)
 }
 
 // displayEpisodeInfo shows episode details with watch/download options
 func (b *Bot) displayEpisodeInfo(chatID int64, userID int64, series *Movie, season, episode int) {
+	text, keyboard := b.buildEpisodeInfoMessage(userID, series, season, episode)
+	b.sendMessageWithInline(chatID, text, keyboard)
+}
+
+func (b *Bot) buildEpisodeInfoMessage(userID int64, series *Movie, season, episode int) (string, tgbotapi.InlineKeyboardMarkup) {
 	text := fmt.Sprintf(`📺 <b>%s</b>
 📁 Season %d, Episode %d
 
@@ -362,10 +404,10 @@ Ready to watch?`, series.Title, season, episode)
 	))
 
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(rows...)
-	b.sendMessageWithInline(chatID, text, keyboard)
 
 	// Avoid unused variable warning
 	_ = embedURL
+	return text, keyboard
 }
 
 // handleWatchEpisode initiates episode download

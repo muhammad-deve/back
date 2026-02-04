@@ -42,6 +42,10 @@ func NewDownloadManager(outputDir string) *DownloadManager {
 	}
 }
 
+func (dm *DownloadManager) OutputDir() string {
+	return dm.outputDir
+}
+
 func (dm *DownloadManager) isVerbose() bool {
 	return false
 }
@@ -52,6 +56,12 @@ func (dm *DownloadManager) DownloadVideo(embedURL, title string) (string, error)
 }
 
 func (dm *DownloadManager) DownloadVideoWithProgress(embedURL, title string, onProgress func(DownloadProgress)) (string, error) {
+	safeTitle := sanitizeFilename(title)
+	outputFile := filepath.Join(dm.outputDir, fmt.Sprintf("%s_%d.mp4", safeTitle, time.Now().Unix()))
+	return dm.DownloadVideoWithProgressToFile(embedURL, title, outputFile, onProgress)
+}
+
+func (dm *DownloadManager) DownloadVideoWithProgressToFile(embedURL, title, outputFile string, onProgress func(DownloadProgress)) (string, error) {
 	dm.mu.Lock()
 	if dm.active[embedURL] {
 		dm.mu.Unlock()
@@ -100,10 +110,6 @@ func (dm *DownloadManager) DownloadVideoWithProgress(embedURL, title string, onP
 	if dm.isVerbose() {
 		log.Println("[STEP 3/3] Downloading video...")
 	}
-
-	// Clean title for filename
-	safeTitle := sanitizeFilename(title)
-	outputFile := filepath.Join(dm.outputDir, fmt.Sprintf("%s_%d.mp4", safeTitle, time.Now().Unix()))
 
 	for _, stream := range streams {
 		if downloadWithFFmpeg(stream, iframeURL, outputFile, onProgress, dm.isVerbose()) {

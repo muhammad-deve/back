@@ -315,6 +315,8 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 	userID := callback.From.ID
 	chatID := callback.Message.Chat.ID
+	messageID := callback.Message.MessageID
+	useCaption := len(callback.Message.Photo) > 0 || callback.Message.Caption != ""
 	data := callback.Data
 
 	log.Printf("🔘 Callback from %s (%d): %s", callback.From.UserName, userID, data)
@@ -380,15 +382,15 @@ func (b *Bot) handleCallback(callback *tgbotapi.CallbackQuery) {
 		}
 	case "series_info":
 		if len(parts) > 1 {
-			b.handleSeriesInfo(chatID, userID, parts[1])
+			b.handleSeriesInfo(chatID, userID, messageID, useCaption, parts[1])
 		}
 	case "season":
 		if len(parts) > 2 {
-			b.handleSeasonSelection(chatID, userID, parts[1], parts[2])
+			b.handleSeasonSelection(chatID, userID, messageID, useCaption, parts[1], parts[2])
 		}
 	case "episode":
 		if len(parts) > 3 {
-			b.handleEpisodeSelection(chatID, userID, parts[1], parts[2], parts[3])
+			b.handleEpisodeSelection(chatID, userID, messageID, useCaption, parts[1], parts[2], parts[3])
 		}
 	case "watch_episode":
 		if len(parts) > 3 {
@@ -476,6 +478,15 @@ func (b *Bot) editMessageWithInline(chatID int64, messageID int, text string, ke
 	msg.ReplyMarkup = &keyboard
 	if _, err := b.api.Send(msg); err != nil {
 		log.Printf("❌ Failed to edit message: %v", err)
+	}
+}
+
+func (b *Bot) editMessageCaptionWithInline(chatID int64, messageID int, text string, keyboard tgbotapi.InlineKeyboardMarkup) {
+	msg := tgbotapi.NewEditMessageCaption(chatID, messageID, text)
+	msg.ParseMode = "HTML"
+	msg.ReplyMarkup = &keyboard
+	if _, err := b.api.Send(msg); err != nil {
+		log.Printf("❌ Failed to edit message caption: %v", err)
 	}
 }
 

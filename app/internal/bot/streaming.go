@@ -21,8 +21,10 @@ type StreamServer struct {
 	baseURL string
 	hlsDir  string
 
-	mu    sync.RWMutex
-	items map[string]time.Time
+	mu      sync.RWMutex
+	items   map[string]time.Time
+	keyToID map[string]string
+	idToKey map[string]string
 
 	once sync.Once
 }
@@ -36,6 +38,8 @@ func NewStreamServer(addr, baseURL, hlsDir string) *StreamServer {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		hlsDir:  hlsDir,
 		items:   map[string]time.Time{},
+		keyToID: map[string]string{},
+		idToKey: map[string]string{},
 	}
 }
 
@@ -73,6 +77,12 @@ func (s *StreamServer) cleanupLoop() {
 		s.mu.Lock()
 		for _, id := range toDelete {
 			delete(s.items, id)
+			if key, ok := s.idToKey[id]; ok {
+				delete(s.idToKey, id)
+				if cur, ok := s.keyToID[key]; ok && cur == id {
+					delete(s.keyToID, key)
+				}
+			}
 		}
 		s.mu.Unlock()
 
@@ -156,6 +166,37 @@ func (s *StreamServer) CreateStreamFromMP4(mp4Path string) (string, error) {
 	s.mu.Lock()
 	s.items[id] = time.Now()
 	s.mu.Unlock()
+
+	return id, nil
+}
+
+func (s *StreamServer) CreateStreamFromMP4Cached(key, mp4Path string) (string, error) {
+	key = strings.TrimSpace(key)
+	if key != "" {
+		s.mu.RLock()
+		if id, ok := s.keyToID[key]; ok {
+			s.mu.RUnlock()
+			if s.Has(id) {
+				if st, err := os.Stat(filepath.Join(s.hlsDir, id, "index.m3u8")); err == nil && st.Size() > 0 {
+					return id, nil
+				}
+			}
+		} else {
+			s.mu.RUnlock()
+		}
+	}
+
+	id, err := s.CreateStreamFromMP4(mp4Path)
+	if err != nil {
+		return "", err
+	}
+
+	if key != "" {
+		s.mu.Lock()
+		s.keyToID[key] = id
+		s.idToKey[id] = key
+		s.mu.Unlock()
+	}
 
 	return id, nil
 }
