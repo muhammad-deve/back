@@ -1,0 +1,37 @@
+services:
+  frontend:
+    build:
+      context: ../../front
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_SITE_URL: https://freetvchannels.online
+        SITE_URL: https://freetvchannels.online
+        NEXT_PUBLIC_PB_URL: https://back.freetvchannels.online
+        PB_URL: http://backend:8090
+    container_name: movies-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:3000"
+    env_file:
+      - ../app/.env
+    environment:
+      NEXT_PUBLIC_SITE_URL: https://freetvchannels.online
+      SITE_URL: https://freetvchannels.online
+      NEXT_PUBLIC_PB_URL: https://back.freetvchannels.online
+      PB_URL: http://backend:8090
+
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: movies-backend
+    restart: unless-stopped
+    ports:
+      - "8090:8090"
+      - "3002:3002"
+    env_file:
+      - ../app/.env
+    volumes:
+      - ../app/artifacts/pb_data:/pb_data
