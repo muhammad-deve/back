@@ -54,10 +54,14 @@ jobs:
             set -e
             cd ~/personal/movies/back
             git pull --ff-only origin main
+            docker rm -f movies-backend >/dev/null 2>&1 || true
             if docker compose version >/dev/null 2>&1; then
-              docker compose -f deploy/docker-compose.yml up -d --build backend
+              docker compose -f deploy/docker-compose.yml build backend
+              docker compose -f deploy/docker-compose.yml up -d --no-deps backend
             elif command -v docker-compose >/dev/null 2>&1; then
-              docker-compose -f deploy/docker-compose.yml up -d --build backend
+              docker-compose -f deploy/docker-compose.yml build backend
+              docker-compose -f deploy/docker-compose.yml rm -fs backend >/dev/null 2>&1 || true
+              docker-compose -f deploy/docker-compose.yml up -d --no-deps backend
             else
               echo "Neither 'docker compose' nor 'docker-compose' is installed on VPS."
               exit 1
