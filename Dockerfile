@@ -16,4 +16,6 @@ FROM alpine:3.19
 
 COPY --from=build /app/main /main
 
-CMD ["/main", "serve", "--http=0.0.0.0:8090"]
+EXPOSE 8090 3002
+
+CMD ["/main", "serve", "--dir=/pb_data", "--http=0.0.0.0:8090"]
